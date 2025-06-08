@@ -1,0 +1,32 @@
+.at-a-glance-label {
+    font-weight: normal;
+    color: white;
+    margin: 0 8px;
+}
+
+.task-item {
+    spacing: 8px;
+    padding: 4px 0;
+}
+
+.task-overdue {
+    color: #ff6b6b;
+    font-weight: bold;
+}
+
+.task-normal {
+    color: #ffffff;
+}
+
+.task-completed {
+    text-decoration: line-through;
+    color: #888888;
+}
+
+.task-badge {
+    background-color: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 0.8em;
+    margin-left: 8px;
+}

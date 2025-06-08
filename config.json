@@ -1,0 +1,21 @@
+{
+  "claude_api_key": "YOUR_CLAUDE_API_KEY",
+  "openweather_api_key": "YOUR_OPENWEATHER_API_KEY",
+  "todoist_api_key": "YOUR_TODOIST_API_KEY",
+  "update_interval": 3600,
+  "max_daily_requests": 24,
+  "priorities": {
+    "morning": ["calendar", "weather", "tasks"],
+    "afternoon": ["tasks", "calendar", "notifications"],
+    "evening": ["tasks", "weather", "system"]
+  },
+  "features": {
+    "weather": true,
+    "calendar": true,
+    "tasks": true,
+    "todoist": true,
+    "system_info": true,
+    "claude_insights": true
+  },
+  "location_override": null
+}

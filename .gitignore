@@ -1,0 +1,29 @@
+# Nix build artifacts
+result
+result-*
+
+# Development artifacts
+.direnv/
+.envrc
+
+# GNOME extension temporary files
+*.gschema.valid
+*.pot
+*.po~
+
+# Config files with secrets - protect user's real API keys
+config-local.json
+~/.config/at-a-glance/config.json
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Logs
+*.log

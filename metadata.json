@@ -1,0 +1,8 @@
+{
+  "name": "GNOME At A Glance",
+  "description": "Intelligent contextual information widget powered by Claude AI",
+  "uuid": "at-a-glance@gnome-extension",
+  "shell-version": ["45", "46", "47", "48"],
+  "version": 1,
+  "url": "https://github.com/heytcass/gnome-at-a-glance"
+}

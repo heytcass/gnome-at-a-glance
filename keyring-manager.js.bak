@@ -1,0 +1,293 @@
+// keyring-manager.js - Secure API key management using GNOME Keyring
+const { Secret } = imports.gi;
+
+const KeyringManager = {
+    // Schema for our API keys
+    SCHEMA: new Secret.Schema(
+        "com.gnome.at-a-glance.api-keys",
+        Secret.SchemaFlags.NONE,
+        {
+            "service": Secret.SchemaAttributeType.STRING,
+        }
+    ),
+
+    // Application name for keyring entries
+    APP_NAME: "GNOME At A Glance",
+
+    async storeApiKey(service, apiKey) {
+        try {
+            const result = await new Promise((resolve, reject) => {
+                Secret.password_store(
+                    this.SCHEMA,
+                    { service: service },
+                    Secret.COLLECTION_DEFAULT,
+                    `${this.APP_NAME} ${service} API Key`,
+                    apiKey,
+                    null, // cancellable
+                    (source, result) => {
+                        try {
+                            const success = Secret.password_store_finish(result);
+                            resolve(success);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    }
+                );
+            });
+            
+            log(`Successfully stored ${service} API key in keyring`);
+            return true;
+        } catch (error) {
+            log(`Failed to store ${service} API key: ${error}`);
+            return false;
+        }
+    },
+
+    async retrieveApiKey(service) {
+        try {
+            const apiKey = await new Promise((resolve, reject) => {
+                Secret.password_lookup(
+                    this.SCHEMA,
+                    { service: service },
+                    null, // cancellable
+                    (source, result) => {
+                        try {
+                            const password = Secret.password_lookup_finish(result);
+                            resolve(password);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    }
+                );
+            });
+            
+            if (apiKey) {
+                log(`Retrieved ${service} API key from keyring`);
+                return apiKey;
+            } else {
+                log(`No ${service} API key found in keyring`);
+                return null;
+            }
+        } catch (error) {
+            log(`Failed to retrieve ${service} API key: ${error}`);
+            return null;
+        }
+    },
+
+    async deleteApiKey(service) {
+        try {
+            const result = await new Promise((resolve, reject) => {
+                Secret.password_clear(
+                    this.SCHEMA,
+                    { service: service },
+                    null, // cancellable
+                    (source, result) => {
+                        try {
+                            const success = Secret.password_clear_finish(result);
+                            resolve(success);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    }
+                );
+            });
+            
+            log(`Successfully deleted ${service} API key from keyring`);
+            return true;
+        } catch (error) {
+            log(`Failed to delete ${service} API key: ${error}`);
+            return false;
+        }
+    },
+
+    async hasApiKey(service) {
+        const key = await this.retrieveApiKey(service);
+        return key !== null && key.length > 0;
+    },
+
+    // Initialize keyring access
+    async initialize() {
+        try {
+            // Test keyring access by attempting to store and retrieve a test value
+            const testKey = "test-access";
+            const testValue = "test-value-" + Date.now();
+            
+            await this.storeApiKey(testKey, testValue);
+            const retrieved = await this.retrieveApiKey(testKey);
+            await this.deleteApiKey(testKey);
+            
+            if (retrieved === testValue) {
+                log("Keyring access verified successfully");
+                return true;
+            } else {
+                log("Keyring test failed - retrieved value doesn't match");
+                return false;
+            }
+        } catch (error) {
+            log(`Keyring initialization failed: ${error}`);
+            return false;
+        }
+    },
+
+    // Get all API keys needed for the extension
+    async getAllApiKeys() {
+        const keys = {};
+        
+        const services = ['claude', 'todoist', 'openweather'];
+        
+        for (const service of services) {
+            keys[service] = await this.retrieveApiKey(service);
+        }
+        
+        return keys;
+    },
+
+    // Store multiple API keys
+    async storeAllApiKeys(apiKeys) {
+        const results = {};
+        
+        for (const [service, key] of Object.entries(apiKeys)) {
+            if (key && key.trim().length > 0) {
+                results[service] = await this.storeApiKey(service, key.trim());
+            }
+        }
+        
+        return results;
+    },
+
+    // Check which API keys are available
+    async getAvailableServices() {
+        const services = ['claude', 'todoist', 'openweather'];
+        const available = [];
+        
+        for (const service of services) {
+            if (await this.hasApiKey(service)) {
+                available.push(service);
+            }
+        }
+        
+        return available;
+    },
+
+    // Migration helper: move keys from config file to keyring
+    async migrateFromConfig(configPath) {
+        try {
+            const configFile = Gio.File.new_for_path(configPath);
+            const [success, contents] = configFile.load_contents(null);
+            
+            if (!success) {
+                log("No config file found for migration");
+                return false;
+            }
+            
+            const config = JSON.parse(contents);
+            const migrated = {};
+            
+            // Migrate each API key
+            if (config.claude_api_key) {
+                migrated.claude = await this.storeApiKey('claude', config.claude_api_key);
+            }
+            
+            if (config.todoist_api_key) {
+                migrated.todoist = await this.storeApiKey('todoist', config.todoist_api_key);
+            }
+            
+            if (config.openweather_api_key) {
+                migrated.openweather = await this.storeApiKey('openweather', config.openweather_api_key);
+            }
+            
+            // Create a backup of the old config and remove API keys
+            const backupConfig = { ...config };
+            delete config.claude_api_key;
+            delete config.todoist_api_key;
+            delete config.openweather_api_key;
+            
+            // Save cleaned config
+            configFile.replace_contents(
+                JSON.stringify(config, null, 2),
+                null,
+                false,
+                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                null
+            );
+            
+            // Save backup
+            const backupFile = Gio.File.new_for_path(configPath + '.backup');
+            backupFile.replace_contents(
+                JSON.stringify(backupConfig, null, 2),
+                null,
+                false,
+                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                null
+            );
+            
+            log(`Migration completed. Migrated: ${Object.keys(migrated).filter(k => migrated[k]).join(', ')}`);
+            log(`Backup saved to: ${configPath}.backup`);
+            
+            return true;
+        } catch (error) {
+            log(`Migration failed: ${error}`);
+            return false;
+        }
+    }
+};
+
+// Helper function to get API keys with fallback to config file
+async function getApiKeysWithFallback(configPath) {
+    // First try keyring
+    const keyringKeys = await KeyringManager.getAllApiKeys();
+    
+    // Check if we have any keys in keyring
+    const hasKeyringKeys = Object.values(keyringKeys).some(key => key !== null);
+    
+    if (hasKeyringKeys) {
+        return {
+            claude_api_key: keyringKeys.claude,
+            todoist_api_key: keyringKeys.todoist,
+            openweather_api_key: keyringKeys.openweather,
+            source: 'keyring'
+        };
+    }
+    
+    // Fallback to config file and attempt migration
+    try {
+        const configFile = Gio.File.new_for_path(configPath);
+        const [success, contents] = configFile.load_contents(null);
+        
+        if (success) {
+            const config = JSON.parse(contents);
+            
+            // Check if config has API keys to migrate
+            if (config.claude_api_key || config.todoist_api_key || config.openweather_api_key) {
+                log("Found API keys in config file, attempting migration to keyring...");
+                await KeyringManager.migrateFromConfig(configPath);
+                
+                // Return keys from keyring after migration
+                const newKeyringKeys = await KeyringManager.getAllApiKeys();
+                return {
+                    claude_api_key: newKeyringKeys.claude,
+                    todoist_api_key: newKeyringKeys.todoist,
+                    openweather_api_key: newKeyringKeys.openweather,
+                    source: 'keyring-migrated'
+                };
+            }
+            
+            // No API keys in config either
+            return {
+                claude_api_key: null,
+                todoist_api_key: null,
+                openweather_api_key: null,
+                source: 'none'
+            };
+        }
+    } catch (error) {
+        log(`Error reading config file: ${error}`);
+    }
+    
+    return {
+        claude_api_key: null,
+        todoist_api_key: null,
+        openweather_api_key: null,
+        source: 'none'
+    };
+}
