@@ -3,24 +3,14 @@ import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
-import Soup from 'gi://Soup';
-import Secret from 'gi://Secret';
+import Soup from 'gi://Soup?version=3.0';
 
-// Try to import EDS - it might not be available in all environments
-let EDataServer, ECal, ICalGLib;
-try {
-    EDataServer = imports.gi.EDataServer;
-    ECal = imports.gi.ECal;  
-    ICalGLib = imports.gi.ICalGLib;
-} catch (e) {
-    console.log('At A Glance: EDS not available, using mock calendar data');
-}
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-// Helper function to get API key from config file (simpler approach)
+// Helper function to get API key from config file
 function getApiKey(service) {
     try {
         const configPath = GLib.get_home_dir() + '/.config/at-a-glance/config.json';
@@ -29,7 +19,7 @@ function getApiKey(service) {
         if (configFile.query_exists(null)) {
             const [success, contents] = configFile.load_contents(null);
             if (success) {
-                const config = JSON.parse(contents);
+                const config = JSON.parse(new TextDecoder().decode(contents));
                 const keyMap = {
                     'claude': 'claude_api_key',
                     'openweather': 'openweather_api_key', 
@@ -45,7 +35,7 @@ function getApiKey(service) {
     }
 }
 
-// Simple data collector without API integration for now
+// Data collection object
 const DataCollector = {
     async getSmartLocation() {
         // 1. Check user config override first
@@ -66,13 +56,13 @@ const DataCollector = {
             console.log('At A Glance: Could not read config for location override:', e);
         }
         
-        // 2. Try IP-based geolocation (simple and privacy-friendly)
+        // 2. Try IP-based geolocation
         try {
             const httpSession = new Soup.Session();
             const message = Soup.Message.new('GET', 'http://ip-api.com/json/?fields=city,regionName,countryCode');
             
             const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
-            if (message.status_code === 200) {
+            if (message.get_status() === 200) {
                 const decoder = new TextDecoder('utf-8');
                 const responseText = decoder.decode(response.get_data());
                 const location = JSON.parse(responseText);
@@ -87,15 +77,14 @@ const DataCollector = {
             console.log('At A Glance: Could not detect location via IP:', e);
         }
         
-        // 3. Default to Detroit (where this extension was developed!)
+        // 3. Default to Detroit
         console.log('At A Glance: Using default location: Detroit, MI');
         return 'Detroit,MI,US';
     },
+
     async getWeather() {
         try {
-            // Get API key from config
             const apiKey = getApiKey('openweather');
-
             if (!apiKey) {
                 return { 
                     temp: '--', 
@@ -104,32 +93,26 @@ const DataCollector = {
                 };
             }
 
-            // OpenWeatherMap API call with smart location detection
             const city = await DataCollector.getSmartLocation();
             const url = `https://api.openweathermap.org/data/2.5/weather?q=${city}&appid=${apiKey}&units=imperial`;
             
             const httpSession = new Soup.Session();
             const message = Soup.Message.new('GET', url);
             
-            try {
-                const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
-                if (message.status_code === 200) {
-                    const decoder = new TextDecoder('utf-8');
-                    const responseText = decoder.decode(response.get_data());
-                    const data = JSON.parse(responseText);
-                    const weatherData = {
-                        temp: Math.round(data.main.temp),
-                        condition: data.weather[0].main,
-                        description: data.weather[0].description,
-                        humidity: data.main.humidity,
-                        windSpeed: Math.round(data.wind?.speed || 0)
-                    };
-                    return weatherData;
-                } else {
-                    return { temp: '--', condition: 'Error', description: `API Error: ${message.status_code}` };
-                }
-            } catch (e) {
-                return { temp: '--', condition: 'Error', description: 'Failed to parse weather data' };
+            const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
+            if (message.get_status() === 200) {
+                const decoder = new TextDecoder('utf-8');
+                const responseText = decoder.decode(response.get_data());
+                const data = JSON.parse(responseText);
+                return {
+                    temp: Math.round(data.main.temp),
+                    condition: data.weather[0].main,
+                    description: data.weather[0].description,
+                    humidity: data.main.humidity,
+                    windSpeed: Math.round(data.wind?.speed || 0)
+                };
+            } else {
+                return { temp: '--', condition: 'Error', description: `API Error: ${message.get_status()}` };
             }
         } catch (error) {
             console.error('Weather API error:', error);
@@ -139,60 +122,155 @@ const DataCollector = {
 
     async getCalendarEvents() {
         try {
-            // Try to get real calendar events from Evolution Data Server
-            if (EDataServer && ECal && ICalGLib) {
+            // Import EDS libraries dynamically when needed
+            const ECal = await import('gi://ECal?version=2.0').then(m => m.default);
+            const EDataServer = await import('gi://EDataServer?version=1.2').then(m => m.default);
+            const ICalGLib = await import('gi://ICalGLib?version=3.0').then(m => m.default);
+            
+            console.log('At A Glance: EDS libraries loaded successfully');
+            
+            // Create registry with Promise wrapper
+            const registry = await new Promise((resolve, reject) => {
+                const cancellable = new Gio.Cancellable();
+                EDataServer.SourceRegistry.new(cancellable, (source, result) => {
+                    try {
+                        const registry = EDataServer.SourceRegistry.new_finish(result);
+                        resolve(registry);
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
+            });
+            
+            const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
+            console.log(`At A Glance: Found ${sources.length} calendar sources`);
+            
+            const events = [];
+            const now = new Date();
+            const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const todayEnd = new Date(todayStart);
+            todayEnd.setDate(todayEnd.getDate() + 1);
+            
+            for (const source of sources) {
                 try {
-                    // Check for calendar data files
-                    const calendarDir = GLib.get_home_dir() + '/.local/share/evolution/calendar';
-                    const dir = Gio.File.new_for_path(calendarDir);
+                    if (!source.get_enabled()) continue;
                     
-                    if (dir.query_exists(null)) {
-                        // Check if there's actual calendar data
-                        const calFile = Gio.File.new_for_path(calendarDir + '/system/calendar.ics');
-                        if (calFile.query_exists(null)) {
-                            const [success, contents] = calFile.load_contents(null);
-                            if (success) {
-                                const calendarData = new TextDecoder().decode(contents);
-                                // Check if there are any VEVENT entries
-                                if (calendarData.includes('BEGIN:VEVENT')) {
-                                    return [{
-                                        time: 'Sync',
-                                        title: 'Calendar events found',
-                                        location: 'Evolution integration active'
-                                    }];
+                    console.log(`At A Glance: Connecting to calendar: ${source.get_display_name()}`);
+                    
+                    // Connect to calendar client with Promise wrapper
+                    const client = await new Promise((resolve, reject) => {
+                        const cancellable = new Gio.Cancellable();
+                        ECal.Client.connect(
+                            source,
+                            ECal.ClientSourceType.EVENTS,
+                            30,
+                            cancellable,
+                            (source, result) => {
+                                try {
+                                    const client = ECal.Client.connect_finish(result);
+                                    resolve(client);
+                                } catch (error) {
+                                    resolve(null); // Don't reject, just skip this source
                                 }
                             }
-                        }
+                        );
+                    });
+                    
+                    if (!client) continue;
+                    
+                    // Get events with Promise wrapper
+                    const components = await new Promise((resolve, reject) => {
+                        const cancellable = new Gio.Cancellable();
+                        const startTime = Math.floor(todayStart.getTime() / 1000);
+                        const endTime = Math.floor(todayEnd.getTime() / 1000);
+                        const query = `(occur-in-time-range? (make-time \"${startTime}\") (make-time \"${endTime}\"))`;
                         
-                        // Calendar system exists but no events
-                        return [{
-                            time: 'Empty',
-                            title: 'No calendar events scheduled',
-                            location: 'Add events in GNOME Calendar'
-                        }];
+                        client.get_object_list_as_comps(query, cancellable, (client, result) => {
+                            try {
+                                const [success, comps] = client.get_object_list_as_comps_finish(result);
+                                resolve(success ? comps || [] : []);
+                            } catch (error) {
+                                resolve([]);
+                            }
+                        });
+                    });
+                    
+                    // Process events
+                    for (const comp of components) {
+                        try {
+                            const event = comp.get_first_component(ICalGLib.ComponentKind.VEVENT);
+                            if (event) {
+                                const summary = event.get_summary();
+                                const dtstart = event.get_dtstart();
+                                const location = event.get_location();
+                                
+                                if (summary && dtstart) {
+                                    const startDate = new Date(
+                                        dtstart.get_year(),
+                                        dtstart.get_month() - 1,
+                                        dtstart.get_day(),
+                                        dtstart.get_hour(),
+                                        dtstart.get_minute()
+                                    );
+                                    
+                                    const timeDiff = startDate - now;
+                                    const minutesUntil = Math.round(timeDiff / (1000 * 60));
+                                    
+                                    let timeDisplay;
+                                    if (minutesUntil < -60) {
+                                        timeDisplay = 'Past';
+                                    } else if (minutesUntil < 0) {
+                                        timeDisplay = 'Now';
+                                    } else if (minutesUntil < 60) {
+                                        timeDisplay = `${minutesUntil}m`;
+                                    } else {
+                                        timeDisplay = startDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                    }
+                                    
+                                    events.push({
+                                        time: timeDisplay,
+                                        title: summary,
+                                        location: location || '',
+                                        startTime: startDate,
+                                        minutesUntil: minutesUntil
+                                    });
+                                }
+                            }
+                        } catch (e) {
+                            console.log('At A Glance: Error parsing event:', e);
+                        }
                     }
+                    
                 } catch (e) {
-                    console.log('At A Glance: Could not access calendar data:', e);
+                    console.log(`At A Glance: Error accessing calendar ${source.get_display_name()}:`, e);
                 }
             }
             
-            // No calendar system detected
+            // Sort events by start time
+            events.sort((a, b) => a.startTime - b.startTime);
+            
+            if (events.length > 0) {
+                console.log(`At A Glance: Successfully retrieved ${events.length} events`);
+                return events.slice(0, 3);
+            } else {
+                console.log('At A Glance: No events found for today');
+                return [];
+            }
+            
+        } catch (error) {
+            console.error('At A Glance: Calendar integration failed:', error);
+            // Fallback to show calendar is available but had issues
             return [{
                 time: 'Setup',
-                title: 'Calendar integration unavailable',
-                location: 'Install GNOME Calendar for events'
+                title: 'Calendar integration available',
+                location: 'Add events in GNOME Calendar'
             }];
-        } catch (error) {
-            console.error('Calendar error:', error);
-            return [{ time: 'Error', title: 'Calendar unavailable', location: '' }];
         }
     },
 
     async getTasks() {
         try {
-            // Get Todoist API key from config
             const apiKey = getApiKey('todoist');
-            
             if (!apiKey) {
                 return [
                     { title: 'Configure Todoist API key for task sync', priority: 'high' },
@@ -200,31 +278,25 @@ const DataCollector = {
                 ];
             }
 
-            // Fetch tasks from Todoist API
             const httpSession = new Soup.Session();
             const message = Soup.Message.new('GET', 'https://api.todoist.com/rest/v2/tasks');
+            message.get_request_headers().append('Authorization', `Bearer ${apiKey}`);
             
-            message.request_headers.append('Authorization', `Bearer ${apiKey}`);
-            
-            try {
-                const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
-                if (message.status_code === 200) {
-                    const decoder = new TextDecoder('utf-8');
-                    const responseText = decoder.decode(response.get_data());
-                    const data = JSON.parse(responseText);
-                    const formattedTasks = data.slice(0, 5).map(task => ({
-                        title: task.content,
-                        priority: task.priority >= 3 ? 'high' : task.priority === 2 ? 'medium' : 'low',
-                        due: task.due ? task.due.string : null,
-                        project: task.project_id,
-                        id: task.id
-                    }));
-                    return formattedTasks.length > 0 ? formattedTasks : [{ title: 'No tasks found', priority: 'low' }];
-                } else {
-                    return [{ title: `Todoist API error: ${message.status_code}`, priority: 'high' }];
-                }
-            } catch (e) {
-                return [{ title: 'Error parsing Todoist data', priority: 'high' }];
+            const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
+            if (message.get_status() === 200) {
+                const decoder = new TextDecoder('utf-8');
+                const responseText = decoder.decode(response.get_data());
+                const data = JSON.parse(responseText);
+                const formattedTasks = data.slice(0, 5).map(task => ({
+                    title: task.content,
+                    priority: task.priority >= 3 ? 'high' : task.priority === 2 ? 'medium' : 'low',
+                    due: task.due ? task.due.string : null,
+                    project: task.project_id,
+                    id: task.id
+                }));
+                return formattedTasks.length > 0 ? formattedTasks : [{ title: 'No tasks found', priority: 'low' }];
+            } else {
+                return [{ title: `Todoist API error: ${message.get_status()}`, priority: 'high' }];
             }
         } catch (error) {
             console.error('Todoist API error:', error);
@@ -237,9 +309,7 @@ const DataCollector = {
 
     async getClaudeInsights(data) {
         try {
-            // Get Claude API key from config
             const apiKey = getApiKey('claude');
-
             if (!apiKey) {
                 return {
                     summary: 'Configure Claude API key for AI insights',
@@ -247,13 +317,11 @@ const DataCollector = {
                 };
             }
 
-            // Create a contextual prompt for Claude
             const now = new Date();
             const hour = now.getHours();
             const timeContext = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
             
-            // Extract meaningful context from the data
-            const hasEvents = data.calendar.length > 0 && !data.calendar[0].title.includes('No calendar events');
+            const hasEvents = data.calendar.length > 0;
             const urgentTasks = data.tasks.filter(task => task.priority === 'high');
             const urgentTaskTitles = urgentTasks.slice(0, 2).map(t => t.title).join(', ');
             const weatherTemp = data.weather.temp;
@@ -278,9 +346,9 @@ Response:`;
             const httpSession = new Soup.Session();
             const message = Soup.Message.new('POST', 'https://api.anthropic.com/v1/messages');
             
-            message.request_headers.append('Content-Type', 'application/json');
-            message.request_headers.append('anthropic-version', '2023-06-01');
-            message.request_headers.append('x-api-key', apiKey);
+            message.get_request_headers().append('Content-Type', 'application/json');
+            message.get_request_headers().append('anthropic-version', '2023-06-01');
+            message.get_request_headers().append('x-api-key', apiKey);
             
             const body = JSON.stringify({
                 model: 'claude-3-haiku-20240307',
@@ -294,27 +362,20 @@ Response:`;
             const bodyBytes = new TextEncoder().encode(body);
             message.set_request_body_from_bytes('application/json', GLib.Bytes.new(bodyBytes));
 
-            try {
-                const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
-                if (message.status_code === 200) {
-                    const decoder = new TextDecoder('utf-8');
-                    const responseText = decoder.decode(response.get_data());
-                    const result = JSON.parse(responseText);
-                    const content = result.content[0].text.trim();
-                    return {
-                        summary: content,
-                        priority: '🤖 AI Analysis Complete'
-                    };
-                } else {
-                    return {
-                        summary: `Claude API error: ${message.status_code}`,
-                        priority: 'Check API key and credits'
-                    };
-                }
-            } catch (e) {
+            const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
+            if (message.get_status() === 200) {
+                const decoder = new TextDecoder('utf-8');
+                const responseText = decoder.decode(response.get_data());
+                const result = JSON.parse(responseText);
+                const content = result.content[0].text.trim();
                 return {
-                    summary: 'Claude API response error',
-                    priority: 'Check API configuration'
+                    summary: content,
+                    priority: '🤖 AI Analysis Complete'
+                };
+            } else {
+                return {
+                    summary: `Claude API error: ${message.get_status()}`,
+                    priority: 'Check API key and credits'
                 };
             }
         } catch (error) {
@@ -328,43 +389,22 @@ Response:`;
 
     async getSystemInfo() {
         try {
-            // Get battery information
             let batteryLevel = 'N/A';
             try {
-                const upowerPath = '/org/freedesktop/UPower/devices/battery_BAT0';
-                const upowerBus = Gio.DBusProxy.new_for_bus_sync(
-                    Gio.BusType.SYSTEM,
-                    Gio.DBusProxyFlags.NONE,
-                    null,
-                    'org.freedesktop.UPower',
-                    upowerPath,
-                    'org.freedesktop.UPower.Device',
-                    null
-                );
-                
-                const percentage = upowerBus.get_cached_property('Percentage');
-                if (percentage) {
-                    batteryLevel = Math.round(percentage.unpack());
+                const batteryFile = Gio.File.new_for_path('/sys/class/power_supply/BAT0/capacity');
+                if (batteryFile.query_exists(null)) {
+                    const [success, contents] = batteryFile.load_contents(null);
+                    if (success) {
+                        batteryLevel = parseInt(new TextDecoder().decode(contents).trim());
+                    }
                 }
             } catch (e) {
-                try {
-                    const batteryFile = Gio.File.new_for_path('/sys/class/power_supply/BAT0/capacity');
-                    if (batteryFile.query_exists(null)) {
-                        const [success, contents] = batteryFile.load_contents(null);
-                        if (success) {
-                            batteryLevel = parseInt(new TextDecoder().decode(contents).trim());
-                        }
-                    }
-                } catch (e2) {
-                    console.log('At A Glance: Could not read battery info:', e2);
-                }
+                console.log('At A Glance: Could not read battery info:', e);
             }
             
-            // NixOS-specific system checks
             let nixosIssues = 0;
             let nixosStatus = 'OK';
             
-            // Check failed systemd services
             try {
                 const proc = Gio.Subprocess.new(['systemctl', '--failed', '--no-legend'], Gio.SubprocessFlags.STDOUT_PIPE);
                 const [, stdout] = proc.communicate_utf8(null, null);
@@ -375,23 +415,6 @@ Response:`;
                 }
             } catch (e) {
                 console.log('At A Glance: Could not check systemd services:', e);
-            }
-            
-            // Check Nix store disk usage
-            try {
-                const proc = Gio.Subprocess.new(['df', '/nix/store'], Gio.SubprocessFlags.STDOUT_PIPE);
-                const [, stdout] = proc.communicate_utf8(null, null);
-                const lines = stdout.trim().split('\n');
-                if (lines.length > 1) {
-                    const usage = lines[1].split(/\s+/)[4];
-                    const usagePercent = parseInt(usage.replace('%', ''));
-                    if (usagePercent > 85) {
-                        nixosIssues++;
-                        nixosStatus = `Nix store ${usagePercent}% full`;
-                    }
-                }
-            } catch (e) {
-                console.log('At A Glance: Could not check Nix store usage:', e);
             }
             
             return {
@@ -417,25 +440,22 @@ class AtAGlanceIndicator extends PanelMenu.Button {
     _init() {
         super._init(0.0, 'At A Glance');
 
-        // Create the main widget display with contextual icons
         this.buttonText = new St.Label({
-            text: '📊',  // Default icon, will be updated based on context
+            text: '📊',
             y_align: Clutter.ActorAlign.CENTER
         });
 
         this.add_child(this.buttonText);
-
-        // Track if we're showing detailed view
         this._showingDetails = false;
 
-        // Create AI summary as primary content (clickable to expand)
+        // Create AI summary as primary content
         this._aiSummaryItem = new PopupMenu.PopupMenuItem('🤖 Loading insights...');
         this._aiSummaryItem.connect('activate', () => {
             this._toggleDetailedView();
         });
         this.menu.addMenuItem(this._aiSummaryItem);
         
-        // Create detailed sections (initially hidden)
+        // Create detailed sections
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._detailsLabel = new PopupMenu.PopupMenuItem('📋 Detailed Information:');
         this._detailsLabel.setSensitive(false);
@@ -451,30 +471,21 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._tasksItem);
         this.menu.addMenuItem(this._systemItem);
         
-        // Add click handlers for interactive functionality
-        this._weatherItem.connect('activate', () => {
-            this._handleWeatherClick();
-        });
-        
-        this._calendarItem.connect('activate', () => {
-            this._handleCalendarClick();
-        });
-        
-        this._tasksItem.connect('activate', () => {
-            this._handleTasksClick();
-        });
-        
-        this._systemItem.connect('activate', () => {
-            this._handleSystemClick();
-        });
+        // Add click handlers
+        this._weatherItem.connect('activate', () => this._handleWeatherClick());
+        this._calendarItem.connect('activate', () => this._handleCalendarClick());
+        this._tasksItem.connect('activate', () => this._handleTasksClick());
+        this._systemItem.connect('activate', () => this._handleSystemClick());
 
         // Settings menu
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         const settingsItem = new PopupMenu.PopupMenuItem('⚙️ Settings');
         settingsItem.connect('activate', () => {
             try {
-                const ExtensionUtils = imports.misc.extensionUtils;
-                ExtensionUtils.openPrefs();
+                Gio.Subprocess.new(
+                    ['gnome-extensions', 'prefs', 'at-a-glance@gnome-extension'],
+                    Gio.SubprocessFlags.NONE
+                );
             } catch (e) {
                 Main.notify('At A Glance', 'Use: gnome-extensions prefs at-a-glance@gnome-extension');
             }
@@ -509,7 +520,6 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         this._calendarItem.actor.hide();
         this._tasksItem.actor.hide();
         this._systemItem.actor.hide();
-        // Update AI summary to show expand arrow
         if (this._aiSummaryItem.label.text && !this._aiSummaryItem.label.text.includes('▶️')) {
             this._aiSummaryItem.label.text = '▶️ ' + this._aiSummaryItem.label.text.replace('🔽 ', '');
         }
@@ -522,7 +532,6 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         this._calendarItem.actor.show();
         this._tasksItem.actor.show();
         this._systemItem.actor.show();
-        // Update AI summary to show collapse arrow
         if (this._aiSummaryItem.label.text) {
             this._aiSummaryItem.label.text = '🔽 ' + this._aiSummaryItem.label.text.replace('▶️ ', '');
         }
@@ -530,7 +539,6 @@ class AtAGlanceIndicator extends PanelMenu.Button {
 
     async _updateData() {
         try {
-            // Collect all data
             const data = {
                 weather: await DataCollector.getWeather(),
                 calendar: await DataCollector.getCalendarEvents(),
@@ -538,54 +546,42 @@ class AtAGlanceIndicator extends PanelMenu.Button {
                 system: await DataCollector.getSystemInfo()
             };
 
-            // Get Claude insights
             const insights = await DataCollector.getClaudeInsights(data);
             data.insights = insights;
 
-            // Store data for click handlers
             this._lastData = data;
-
-            // Update display
             this._updateDisplay(data);
         } catch (error) {
             console.error('At A Glance: Error updating data:', error);
-            this.buttonText.set_text('At A Glance: Error');
+            this.buttonText.set_text('📊 Error');
         }
     }
 
     _updateDisplay(data) {
-        // Update main button with most urgent item
         const urgentDisplay = this._getMostUrgentDisplay(data);
         this.buttonText.set_text(urgentDisplay);
 
-        // Update AI summary as primary content
         const aiText = data.insights.summary || 'Loading insights...';
         const expandIcon = this._showingDetails ? '🔽' : '▶️';
         this._aiSummaryItem.label.set_text(`${expandIcon} ${aiText}`);
         
-        // Update detailed sections (shown when expanded)
         this._weatherItem.label.set_text(`🌤️ Weather: ${data.weather.temp}°F, ${data.weather.description}`);
         
         const nextEvent = data.calendar[0];
-        const hasRealEvents = nextEvent && !nextEvent.title.includes('No calendar events');
-        
-        if (hasRealEvents) {
+        if (nextEvent && data.calendar.length > 0) {
             this._calendarItem.label.set_text(`📅 Next: ${nextEvent.title} @ ${nextEvent.time}`);
             this._calendarItem.actor.show();
         } else {
-            // Hide calendar section when no events scheduled
             this._calendarItem.actor.hide();
         }
         
         const urgentTasks = data.tasks.filter(t => t.priority === 'high');
         let taskText = '';
         if (urgentTasks.length > 0) {
-            // Show actual high priority task titles
             const urgentTitles = urgentTasks.slice(0, 2).map(t => t.title).join(', ');
             const moreCount = urgentTasks.length > 2 ? ` (+${urgentTasks.length - 2} more)` : '';
             taskText = `📝 Urgent: ${urgentTitles}${moreCount}`;
         } else if (data.tasks.length > 0) {
-            // Show regular tasks if no urgent ones
             const nextTask = data.tasks[0].title;
             taskText = `📝 Next: ${nextTask}${data.tasks.length > 1 ? ` (+${data.tasks.length - 1} more)` : ''}`;
         } else {
@@ -599,9 +595,7 @@ class AtAGlanceIndicator extends PanelMenu.Button {
     }
 
     _getMostUrgentDisplay(data) {
-        // Priority order: System critical > Imminent events > Urgent tasks > Weather > Regular items
-        
-        // 1. System Critical Issues
+        // System critical issues
         const lowBattery = data.system.battery !== 'N/A' && data.system.battery < 20;
         if (lowBattery) {
             return `🔋 ${data.system.battery}% battery`;
@@ -611,10 +605,9 @@ class AtAGlanceIndicator extends PanelMenu.Button {
             return `⚠️ ${data.system.nixosStatus}`;
         }
         
-        // 2. Imminent Calendar Events (< 15 minutes)
+        // Imminent calendar events
         const nextEvent = data.calendar[0];
-        if (nextEvent && !nextEvent.title.includes('No calendar events')) {
-            // Check if event is starting soon (simplified time check)
+        if (nextEvent && data.calendar.length > 0) {
             const eventTime = nextEvent.time;
             if (eventTime && eventTime.includes('min')) {
                 return `🚨 ${nextEvent.title} in ${eventTime}`;
@@ -629,7 +622,7 @@ class AtAGlanceIndicator extends PanelMenu.Button {
             }
         }
         
-        // 3. Urgent Tasks (high priority only)
+        // Urgent tasks
         const urgentTasks = data.tasks.filter(t => t.priority === 'high');
         if (urgentTasks.length > 0) {
             const firstUrgent = urgentTasks[0].title;
@@ -638,23 +631,10 @@ class AtAGlanceIndicator extends PanelMenu.Button {
             return `${icon} ${firstUrgent}${suffix}`;
         }
         
-        // 4. Tasks with due dates (today or overdue only)
-        const todayTasks = data.tasks.filter(t => {
-            if (!t.due) return false;
-            const dueDate = t.due.toLowerCase();
-            return dueDate.includes('today') || dueDate.includes('overdue') || 
-                   dueDate.includes('hour') || dueDate.includes('min');
-        });
-        
-        if (todayTasks.length > 0) {
-            const nextTask = todayTasks[0].title;
-            return `⏰ ${nextTask}`;
-        }
-        
-        // 5. Weather (with appropriate icon)
+        // Weather display
         const temp = data.weather.temp;
         const condition = data.weather.condition;
-        let weatherIcon = '📊'; // default
+        let weatherIcon = '📊';
         
         if (condition.includes('Thunder')) weatherIcon = '⛈️';
         else if (condition.includes('Rain')) weatherIcon = '🌧️';
@@ -662,13 +642,12 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         else if (condition.includes('Fog')) weatherIcon = '🌫️';
         else if (condition.includes('Cloud')) weatherIcon = '☁️';
         else if (condition.includes('Clear') || condition.includes('Sunny')) weatherIcon = '☀️';
-        else weatherIcon = '⛅'; // partly cloudy default
+        else weatherIcon = '⛅';
         
         return `${weatherIcon} ${temp}°F ${condition}`;
     }
 
     _handleWeatherClick() {
-        // Open Rochester Hills weather details  
         try {
             Gio.AppInfo.launch_default_for_uri('https://openweathermap.org/city/5007402', null);
         } catch (e) {
@@ -677,7 +656,6 @@ class AtAGlanceIndicator extends PanelMenu.Button {
     }
 
     _handleCalendarClick() {
-        // Try to open GNOME Calendar
         try {
             const calendar = Gio.AppInfo.create_from_commandline('gnome-calendar', 'Calendar', Gio.AppInfoCreateFlags.NONE);
             calendar.launch([], null);
@@ -687,18 +665,12 @@ class AtAGlanceIndicator extends PanelMenu.Button {
     }
 
     _handleTasksClick() {
-        // Show task completion options or open Todoist
         const urgentTasks = this._lastData?.tasks?.filter(t => t.priority === 'high') || [];
         
         if (urgentTasks.length > 0) {
-            // For now, just show a notification with the urgent task
             const task = urgentTasks[0];
             Main.notify('At A Glance', `Urgent: ${task.title}`);
-            
-            // Future: Could add task completion functionality here
-            // or open Todoist web app
         } else {
-            // Open Todoist
             try {
                 Gio.AppInfo.launch_default_for_uri('https://todoist.com/app', null);
             } catch (e) {
@@ -708,12 +680,10 @@ class AtAGlanceIndicator extends PanelMenu.Button {
     }
 
     _handleSystemClick() {
-        // Open system monitor or show system info
         try {
             const monitor = Gio.AppInfo.create_from_commandline('gnome-system-monitor', 'System Monitor', Gio.AppInfoCreateFlags.NONE);
             monitor.launch([], null);
         } catch (e) {
-            // Fallback: show system info notification
             const battery = this._lastData?.system?.battery || 'Unknown';
             const status = this._lastData?.system?.nixosStatus || 'Unknown';
             Main.notify('At A Glance', `System: ${status}, ${battery}% battery`);
