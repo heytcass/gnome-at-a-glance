@@ -29,20 +29,9 @@ const CalendarIntegration = {
 
     async getUpcomingEvents(hoursAhead = 24) {
         const events = [];
+        // Get time range - from now to hoursAhead from now
         const now = GLib.DateTime.new_now_local();
         const until = now.add_hours(hoursAhead);
-        
-        // Convert to ICal time
-        const startTime = ICalGLib.Time.new_from_timet_with_zone(
-            now.to_unix(),
-            false,
-            ICalGLib.Timezone.get_utc_timezone()
-        );
-        const endTime = ICalGLib.Time.new_from_timet_with_zone(
-            until.to_unix(),
-            false,
-            ICalGLib.Timezone.get_utc_timezone()
-        );
 
         for (const source of this.calendarSources) {
             // Skip disabled sources
@@ -55,33 +44,85 @@ const CalendarIntegration = {
             try {
                 // Open the calendar
                 const client = await this._openCalendarClient(source);
-                if (!client) continue;
+                if (!client) {
+                    log(`At A Glance: Failed to open client for ${source.get_display_name()}`);
+                    continue;
+                }
 
-                // Create query for events in time range
-                const query = `(occur-in-time-range? (make-time "${startTime.as_ical_string()}") (make-time "${endTime.as_ical_string()}"))`;
+                // Create query for events in time range using proper ISO format for EDS
+                // Convert to UTC and format as ISO8601 string without microseconds
+                const nowUTC = now.to_utc().format_iso8601();
+                const untilUTC = until.to_utc().format_iso8601();
+                log(`At A Glance: Raw UTC strings: ${nowUTC} -> ${untilUTC}`);
+                const startISO = nowUTC.split('.')[0] + 'Z';
+                const endISO = untilUTC.split('.')[0] + 'Z';
+                const query = `(occur-in-time-range? (make-time "${startISO}") (make-time "${endISO}"))`;
+                log(`At A Glance: Connecting to calendar: ${source.get_display_name()}`);
+                log(`At A Glance: Query: ${query}`);
+                log(`At A Glance: Time range: ${startISO} to ${endISO}`);
                 
-                // Get events
-                const [success, ecalcomps] = await new Promise((resolve) => {
-                    client.get_object_list_as_comps(
-                        startTime.as_ical_string(),
-                        endTime.as_ical_string(),
-                        null, // cancellable
-                        (client, result) => {
-                            try {
-                                const [success, comps] = client.get_object_list_as_comps_finish(result);
-                                resolve([success, comps]);
-                            } catch (e) {
-                                resolve([false, []]);
-                            }
-                        }
-                    );
-                });
+                // Skip S-expression query, use simple fallback approach
+                log(`At A Glance: Using simple query for ${source.get_display_name()}`);
+                let success = false;
+                let ecalcomps = [];
+                    // Fallback: try getting all events and filter in JavaScript
+                    try {
+                        [success, ecalcomps] = await new Promise((resolve) => {
+                            client.get_object_list(
+                                "#t", // Get all events
+                                null,
+                                (client, result) => {
+                                    try {
+                                        const [success, objects] = client.get_object_list_finish(result);
+                                        if (success && objects) {
+                                            const comps = objects.map(icalString => {
+                                                const icalcomp = ICalGLib.Parser.parse_string(icalString);
+                                                return ECal.Component.new_from_icalcomponent(icalcomp);
+                                            });
+                                            resolve([true, comps]);
+                                        } else {
+                                            resolve([false, []]);
+                                        }
+                                    } catch (e) {
+                                        log(`Error parsing all calendar objects: ${e}`);
+                                        resolve([false, []]);
+                                    }
+                                }
+                            );
+                        });
+                        log(`At A Glance: Fallback query successful, got ${ecalcomps.length} total events`);
+                    } catch (e2) {
+                        log(`Error with fallback query: ${e2}`);
+                        success = false;
+                        ecalcomps = [];
+                    }
+                }
 
                 if (success && ecalcomps) {
+                    log(`At A Glance: Found ${ecalcomps.length} events in ${source.get_display_name()}`);
+                    
+                    // If we used the fallback "#t" query, filter events by time range
+                    const nowUnix = now.to_unix();
+                    const untilUnix = until.to_unix();
+                    
                     ecalcomps.forEach(ecalcomp => {
                         const event = this._parseEvent(ecalcomp, source.get_display_name());
-                        if (event) events.push(event);
+                        if (event) {
+                            // Filter by time range if we used the fallback query
+                            if (query === "#t") {
+                                // Check if event overlaps with our time range
+                                const eventInRange = (event.startTime < untilUnix && event.endTime > nowUnix);
+                                if (!eventInRange) {
+                                    return; // Skip this event
+                                }
+                            }
+                            
+                            log(`At A Glance: Event: ${event.summary} at ${event.timeString} in ${source.get_display_name()}`);
+                            events.push(event);
+                        }
                     });
+                } else {
+                    log(`At A Glance: No events found in ${source.get_display_name()} (success: ${success})`);
                 }
 
             } catch (e) {
