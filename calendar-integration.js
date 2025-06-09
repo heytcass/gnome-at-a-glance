@@ -1,196 +1,95 @@
-// calendar-integration.js - Proper EDS integration for the At A Glance extension
+// calendar-integration.js - GNOME Shell Calendar Server integration
 const { Gio, GLib } = imports.gi;
-const EDataServer = imports.gi.EDataServer;
-const ECal = imports.gi.ECal;
-const ICalGLib = imports.gi.ICalGLib;
+
+// D-Bus interface for GNOME Shell Calendar Server
+const CalendarServerIface = `
+<interface name="org.gnome.Shell.CalendarServer">
+    <method name="SetTimeRange">
+        <arg type="x" name="since" direction="in"/>
+        <arg type="x" name="until" direction="in"/>
+        <arg type="b" name="force_reload" direction="in"/>
+    </method>
+    <signal name="EventsAddedOrUpdated">
+        <arg type="a(ssxxa{sv})" name="events" direction="out"/>
+    </signal>
+    <signal name="EventsRemoved">
+        <arg type="as" name="event_ids" direction="out"/>
+    </signal>
+    <property name="HasCalendars" type="b" access="read"/>
+</interface>`;
+
+const CalendarServerProxy = Gio.DBusProxy.makeProxyWrapper(CalendarServerIface);
 
 const CalendarIntegration = {
-    async initialize() {
+    initialize() {
         try {
-            // Create a new source registry
-            this.registry = EDataServer.SourceRegistry.new_sync(null);
+            log('At A Glance: Initializing GNOME Shell Calendar Server integration');
             
-            // Get all calendar sources (includes Google, local, CalDAV, etc.)
-            this.calendarSources = this.registry.list_sources(
-                EDataServer.SOURCE_EXTENSION_CALENDAR
+            // Connect to GNOME Shell Calendar Server
+            this.calendarProxy = new CalendarServerProxy(
+                Gio.DBus.session,
+                'org.gnome.Shell.CalendarServer',
+                '/org/gnome/Shell/CalendarServer'
             );
             
-            log(`Found ${this.calendarSources.length} calendar sources`);
+            // Connect to events signal
+            this.eventsSignalId = this.calendarProxy.connectSignal(
+                'EventsAddedOrUpdated',
+                this._onEventsUpdated.bind(this)
+            );
             
-            // List all available calendars (for debugging)
-            this.calendarSources.forEach(source => {
-                log(`Calendar: ${source.get_display_name()} - ${source.get_uid()}`);
-            });
+            // Store events cache
+            this.cachedEvents = [];
+            
+            log('At A Glance: Calendar server connected successfully');
+            return true;
             
         } catch (e) {
-            log(`Failed to initialize calendar integration: ${e}`);
+            log(`At A Glance: Failed to initialize calendar server: ${e}`);
+            return false;
         }
     },
 
     async getUpcomingEvents(hoursAhead = 24) {
-        const events = [];
-        // Get time range - from now to hoursAhead from now
-        const now = GLib.DateTime.new_now_local();
-        const until = now.add_hours(hoursAhead);
-
-        for (const source of this.calendarSources) {
-            // Skip disabled sources
-            if (!source.get_enabled()) continue;
-            
-            // Skip task lists and other non-calendar sources
-            const extension = source.get_extension(EDataServer.SOURCE_EXTENSION_CALENDAR);
-            if (!extension) continue;
-
-            try {
-                // Open the calendar
-                const client = await this._openCalendarClient(source);
-                if (!client) {
-                    log(`At A Glance: Failed to open client for ${source.get_display_name()}`);
-                    continue;
-                }
-
-                // Create query for events in time range using proper ISO format for EDS
-                // Convert to UTC and format as ISO8601 string without microseconds
-                const nowUTC = now.to_utc().format_iso8601();
-                const untilUTC = until.to_utc().format_iso8601();
-                log(`At A Glance: Raw UTC strings: ${nowUTC} -> ${untilUTC}`);
-                const startISO = nowUTC.split('.')[0] + 'Z';
-                const endISO = untilUTC.split('.')[0] + 'Z';
-                const query = `(occur-in-time-range? (make-time "${startISO}") (make-time "${endISO}"))`;
-                log(`At A Glance: Connecting to calendar: ${source.get_display_name()}`);
-                log(`At A Glance: Query: ${query}`);
-                log(`At A Glance: Time range: ${startISO} to ${endISO}`);
-                
-                // Skip S-expression query, use simple fallback approach
-                log(`At A Glance: Using simple query for ${source.get_display_name()}`);
-                let success = false;
-                let ecalcomps = [];
-                    // Fallback: try getting all events and filter in JavaScript
-                    try {
-                        [success, ecalcomps] = await new Promise((resolve) => {
-                            client.get_object_list(
-                                "#t", // Get all events
-                                null,
-                                (client, result) => {
-                                    try {
-                                        const [success, objects] = client.get_object_list_finish(result);
-                                        if (success && objects) {
-                                            const comps = objects.map(icalString => {
-                                                const icalcomp = ICalGLib.Parser.parse_string(icalString);
-                                                return ECal.Component.new_from_icalcomponent(icalcomp);
-                                            });
-                                            resolve([true, comps]);
-                                        } else {
-                                            resolve([false, []]);
-                                        }
-                                    } catch (e) {
-                                        log(`Error parsing all calendar objects: ${e}`);
-                                        resolve([false, []]);
-                                    }
-                                }
-                            );
-                        });
-                        log(`At A Glance: Fallback query successful, got ${ecalcomps.length} total events`);
-                    } catch (e2) {
-                        log(`Error with fallback query: ${e2}`);
-                        success = false;
-                        ecalcomps = [];
-                    }
-                }
-
-                if (success && ecalcomps) {
-                    log(`At A Glance: Found ${ecalcomps.length} events in ${source.get_display_name()}`);
-                    
-                    // If we used the fallback "#t" query, filter events by time range
-                    const nowUnix = now.to_unix();
-                    const untilUnix = until.to_unix();
-                    
-                    ecalcomps.forEach(ecalcomp => {
-                        const event = this._parseEvent(ecalcomp, source.get_display_name());
-                        if (event) {
-                            // Filter by time range if we used the fallback query
-                            if (query === "#t") {
-                                // Check if event overlaps with our time range
-                                const eventInRange = (event.startTime < untilUnix && event.endTime > nowUnix);
-                                if (!eventInRange) {
-                                    return; // Skip this event
-                                }
-                            }
-                            
-                            log(`At A Glance: Event: ${event.summary} at ${event.timeString} in ${source.get_display_name()}`);
-                            events.push(event);
-                        }
-                    });
-                } else {
-                    log(`At A Glance: No events found in ${source.get_display_name()} (success: ${success})`);
-                }
-
-            } catch (e) {
-                log(`Error reading calendar ${source.get_display_name()}: ${e}`);
-            }
+        if (!this.calendarProxy) {
+            log('At A Glance: Calendar proxy not initialized');
+            return [];
         }
-
-        // Sort events by start time
-        events.sort((a, b) => a.startTime - b.startTime);
-        return events;
-    },
-
-    async _openCalendarClient(source) {
-        return new Promise((resolve) => {
-            ECal.Client.connect(
-                source,
-                ECal.ClientSourceType.EVENTS,
-                10, // timeout in seconds
-                null, // cancellable
-                (source, result) => {
-                    try {
-                        const client = ECal.Client.connect_finish(result);
-                        resolve(client);
-                    } catch (e) {
-                        log(`Failed to connect to calendar: ${e}`);
-                        resolve(null);
-                    }
-                }
-            );
-        });
-    },
-
-    _parseEvent(ecalcomp, calendarName) {
+        
         try {
-            const icalcomp = ecalcomp.get_icalcomponent();
-            const summary = icalcomp.get_summary();
-            const location = icalcomp.get_location() || '';
-            const description = icalcomp.get_description() || '';
+            // Set time range for the calendar server
+            const now = GLib.DateTime.new_now_local();
+            const until = now.add_hours(hoursAhead);
             
-            // Get start and end times
-            const dtstart = icalcomp.get_dtstart();
-            const dtend = icalcomp.get_dtend();
+            const sinceUnix = now.to_unix();
+            const untilUnix = until.to_unix();
             
-            const startTime = dtstart.as_timet();
-            const endTime = dtend.as_timet();
+            log(`At A Glance: Setting calendar time range: ${sinceUnix} to ${untilUnix}`);
             
-            // Check if it's an all-day event
-            const isAllDay = dtstart.is_date();
+            // Request events for the time range
+            await new Promise((resolve, reject) => {
+                this.calendarProxy.SetTimeRangeRemote(
+                    sinceUnix,
+                    untilUnix, 
+                    true, // force_reload
+                    (result, error) => {
+                        if (error) {
+                            log(`At A Glance: Calendar SetTimeRange error: ${error}`);
+                            reject(error);
+                        } else {
+                            log('At A Glance: Calendar time range set successfully');
+                            resolve(result);
+                        }
+                    }
+                );
+            });
             
-            // Format times
-            const startDateTime = GLib.DateTime.new_from_unix_local(startTime);
-            const endDateTime = GLib.DateTime.new_from_unix_local(endTime);
+            // Return cached events (will be updated via signal)
+            return this._filterEventsByTimeRange(this.cachedEvents, sinceUnix, untilUnix);
             
-            return {
-                summary: summary,
-                location: location,
-                description: description,
-                calendarName: calendarName,
-                startTime: startTime,
-                endTime: endTime,
-                isAllDay: isAllDay,
-                timeString: isAllDay ? 'All day' : startDateTime.format('%l:%M %p'),
-                dateString: startDateTime.format('%A, %B %e'),
-                duration: Math.round((endTime - startTime) / 60), // duration in minutes
-            };
         } catch (e) {
-            log(`Error parsing event: ${e}`);
-            return null;
+            log(`At A Glance: Error getting calendar events: ${e}`);
+            return [];
         }
     },
 
@@ -212,6 +111,63 @@ const CalendarIntegration = {
         
         // Find the next upcoming event that hasn't started yet
         return events.find(event => event.startTime > now);
+    },
+
+    _onEventsUpdated(proxy, sender, [events]) {
+        try {
+            log(`At A Glance: Received ${events.length} calendar events`);
+            
+            // Parse events from D-Bus format
+            this.cachedEvents = events.map(event => this._parseEventFromDbus(event));
+            
+            // Log events for debugging
+            this.cachedEvents.forEach(event => {
+                log(`At A Glance: Calendar Event: ${event.summary} at ${event.timeString}`);
+            });
+            
+        } catch (e) {
+            log(`At A Glance: Error processing calendar events: ${e}`);
+        }
+    },
+
+    _parseEventFromDbus(eventData) {
+        try {
+            // D-Bus event format: (string uid, string summary, int64 start_time, int64 end_time, GVariant extra_info)
+            const [uid, summary, startTime, endTime, extraInfo] = eventData;
+            
+            // Parse extra info (properties)
+            const properties = extraInfo || {};
+            const location = properties['location'] ? properties['location'].unpack() : '';
+            const description = properties['description'] ? properties['description'].unpack() : '';
+            const isAllDay = properties['is-all-day'] ? properties['is-all-day'].unpack() : false;
+            
+            // Format times
+            const startDateTime = GLib.DateTime.new_from_unix_local(startTime);
+            const endDateTime = GLib.DateTime.new_from_unix_local(endTime);
+            
+            return {
+                uid: uid,
+                summary: summary,
+                location: location,
+                description: description,
+                startTime: startTime,
+                endTime: endTime,
+                isAllDay: isAllDay,
+                timeString: isAllDay ? 'All day' : startDateTime.format('%l:%M %p'),
+                dateString: startDateTime.format('%A, %B %e'),
+                duration: Math.round((endTime - startTime) / 60), // duration in minutes
+            };
+        } catch (e) {
+            log(`At A Glance: Error parsing event: ${e}`);
+            return null;
+        }
+    },
+
+    _filterEventsByTimeRange(events, sinceUnix, untilUnix) {
+        return events.filter(event => {
+            // Event overlaps with time range if it starts before range ends and ends after range starts
+            return event.startTime < untilUnix && event.endTime > sinceUnix;
+        });
     },
 
     // Format event for display
@@ -239,10 +195,18 @@ const CalendarIntegration = {
                 summary: event.summary,
                 time: timeString,
                 location: event.location,
-                calendar: event.calendarName,
                 duration: event.duration
             }
         };
+    },
+
+    destroy() {
+        if (this.eventsSignalId) {
+            this.calendarProxy.disconnectSignal(this.eventsSignalId);
+            this.eventsSignalId = null;
+        }
+        this.calendarProxy = null;
+        this.cachedEvents = [];
     }
 };
 
@@ -250,46 +214,30 @@ const CalendarIntegration = {
 DataCollector.getCalendarEvents = async function() {
     try {
         // Initialize calendar integration if not already done
-        if (!CalendarIntegration.registry) {
-            await CalendarIntegration.initialize();
+        if (!CalendarIntegration.calendarProxy) {
+            const success = CalendarIntegration.initialize();
+            if (!success) {
+                log('At A Glance: Failed to initialize calendar integration');
+                return [];
+            }
         }
         
         // Get today's events
         const events = await CalendarIntegration.getTodaysEvents();
+        
+        log(`At A Glance: Found ${events.length} events for today`);
         
         // Format for the extension
         return events.map(event => ({
             time: event.timeString,
             title: event.summary,
             location: event.location,
-            calendar: event.calendarName,
             isAllDay: event.isAllDay,
             raw: event // Keep raw data for Claude
         }));
     } catch (e) {
-        log(`Error getting calendar events: ${e}`);
+        log(`At A Glance: Error getting calendar events: ${e}`);
         // Return empty array as fallback
         return [];
     }
 };
-
-// Example usage in the extension
-async function demonstrateUsage() {
-    // Initialize
-    await CalendarIntegration.initialize();
-    
-    // Get next event
-    const nextEvent = await CalendarIntegration.getNextEvent();
-    if (nextEvent) {
-        const formatted = CalendarIntegration.formatEventForDisplay(nextEvent);
-        log(`Next: ${formatted.short}`);
-    }
-    
-    // Get all events for today
-    const todaysEvents = await CalendarIntegration.getTodaysEvents();
-    log(`You have ${todaysEvents.length} events today`);
-    
-    todaysEvents.forEach(event => {
-        log(`- ${event.summary} at ${event.timeString} (${event.calendarName})`);
-    });
-}
