@@ -1,243 +1,635 @@
-// calendar-integration.js - GNOME Shell Calendar Server integration
-const { Gio, GLib } = imports.gi;
+// calendar-integration.js - Calendar data collection for GNOME At A Glance
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 
-// D-Bus interface for GNOME Shell Calendar Server
-const CalendarServerIface = `
-<interface name="org.gnome.Shell.CalendarServer">
-    <method name="SetTimeRange">
-        <arg type="x" name="since" direction="in"/>
-        <arg type="x" name="until" direction="in"/>
-        <arg type="b" name="force_reload" direction="in"/>
-    </method>
-    <signal name="EventsAddedOrUpdated">
-        <arg type="a(ssxxa{sv})" name="events" direction="out"/>
-    </signal>
-    <signal name="EventsRemoved">
-        <arg type="as" name="event_ids" direction="out"/>
-    </signal>
-    <property name="HasCalendars" type="b" access="read"/>
-</interface>`;
+// Event filter for categorizing and filtering events
+export class EventFilter {
+    constructor() {
+        this.holidayPattern = /\b(holiday|christmas|thanksgiving|easter|new year|memorial day|labor day|independence day|veterans day)\b/i;
+        this.birthdayPattern = /\b(birthday|born|b-day|bday)\b/i;
+        this.anniversaryPattern = /\b(anniversary|wedding|married)\b/i;
+    }
 
-const CalendarServerProxy = Gio.DBusProxy.makeProxyWrapper(CalendarServerIface);
+    shouldExclude(event) {
+        const title = event.title || event.summary || '';
+        const description = event.description || '';
+        const text = `${title} ${description}`.toLowerCase();
+        
+        return this.holidayPattern.test(text) || 
+               this.birthdayPattern.test(text) || 
+               this.anniversaryPattern.test(text);
+    }
 
-const CalendarIntegration = {
-    initialize() {
-        try {
-            log('At A Glance: Initializing GNOME Shell Calendar Server integration');
-            
-            // Connect to GNOME Shell Calendar Server
-            this.calendarProxy = new CalendarServerProxy(
-                Gio.DBus.session,
-                'org.gnome.Shell.CalendarServer',
-                '/org/gnome/Shell/CalendarServer'
-            );
-            
-            // Connect to events signal
-            this.eventsSignalId = this.calendarProxy.connectSignal(
-                'EventsAddedOrUpdated',
-                this._onEventsUpdated.bind(this)
-            );
-            
-            // Store events cache
-            this.cachedEvents = [];
-            
-            log('At A Glance: Calendar server connected successfully');
-            return true;
-            
-        } catch (e) {
-            log(`At A Glance: Failed to initialize calendar server: ${e}`);
-            return false;
+    categorizeEvent(event) {
+        const title = event.title || event.summary || '';
+        const description = event.description || '';
+        const text = `${title} ${description}`.toLowerCase();
+        
+        // Work-related keywords
+        const workKeywords = ['meeting', 'conference', 'call', 'standup', 'interview', 'presentation', 'deadline', 'project', 'work', 'office'];
+        const hasWorkKeyword = workKeywords.some(keyword => text.includes(keyword));
+        
+        if (hasWorkKeyword) return 'work';
+        
+        // Personal keywords
+        const personalKeywords = ['doctor', 'appointment', 'dentist', 'personal', 'family', 'dinner', 'lunch', 'gym', 'workout'];
+        const hasPersonalKeyword = personalKeywords.some(keyword => text.includes(keyword));
+        
+        if (hasPersonalKeyword) return 'personal';
+        
+        return 'general';
+    }
+}
+
+// Calendar data collector
+export class CalendarDataCollector {
+    constructor() {
+        this.cache = new Map();
+        this.cacheTimeout = 5 * 60 * 1000; // 5 minutes
+        this.eventFilter = new EventFilter();
+    }
+
+    async getCalendarEvents() {
+        console.log('At A Glance: getCalendarEvents() called');
+        const cacheKey = 'calendar_events';
+        const cached = this.cache.get(cacheKey);
+        
+        if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
+            console.log(`At A Glance: Using cached calendar data (${cached.data.length} events)`);
+            return cached.data;
         }
-    },
 
-    async getUpcomingEvents(hoursAhead = 24) {
-        if (!this.calendarProxy) {
-            log('At A Glance: Calendar proxy not initialized');
+        try {
+            console.log('At A Glance: Starting calendar data collection...');
+            const events = await this._collectCalendarData();
+            console.log(`At A Glance: Collected ${events.length} raw events`);
+            
+            // Log all discovered events before filtering
+            console.log(`At A Glance: === ALL DISCOVERED EVENTS ===`);
+            for (const event of events) {
+                console.log(`At A Glance: RAW EVENT: "${event.title}" | ${event.start} | ${event.source}`);
+            }
+            
+            const filteredEvents = this._filterAndProcessEvents(events);
+            console.log(`At A Glance: Filtered to ${filteredEvents.length} events`);
+            
+            // Log final filtered events
+            console.log(`At A Glance: === FINAL FILTERED EVENTS ===`);
+            for (const event of filteredEvents) {
+                console.log(`At A Glance: FINAL EVENT: "${event.title}" | ${event.start} | ${event.source}`);
+            }
+            
+            this.cache.set(cacheKey, {
+                data: filteredEvents,
+                timestamp: Date.now()
+            });
+            
+            return filteredEvents;
+        } catch (error) {
+            console.error('At A Glance: Calendar collection error:', error);
             return [];
         }
+    }
+
+    async _collectCalendarData() {
+        const events = [];
         
+        // Method 1: GNOME Shell Calendar Server D-Bus (preferred)
         try {
-            // Set time range for the calendar server
-            const now = GLib.DateTime.new_now_local();
-            const until = now.add_hours(hoursAhead);
-            
-            const sinceUnix = now.to_unix();
-            const untilUnix = until.to_unix();
-            
-            log(`At A Glance: Setting calendar time range: ${sinceUnix} to ${untilUnix}`);
-            
-            // Request events for the time range
-            await new Promise((resolve, reject) => {
-                this.calendarProxy.SetTimeRangeRemote(
-                    sinceUnix,
-                    untilUnix, 
-                    true, // force_reload
-                    (result, error) => {
-                        if (error) {
-                            log(`At A Glance: Calendar SetTimeRange error: ${error}`);
+            console.log('At A Glance: Attempting GNOME Shell Calendar Server integration...');
+            const calendarServerEvents = await this._readCalendarServerData();
+            events.push(...calendarServerEvents);
+            console.log(`At A Glance: Calendar Server found ${calendarServerEvents.length} events`);
+        } catch (error) {
+            console.log('At A Glance: Calendar Server integration failed:', error);
+        }
+        
+        // Method 2: SQLite fallback (if Calendar Server fails)
+        if (events.length === 0) {
+            try {
+                console.log('At A Glance: Falling back to SQLite method...');
+                const sqliteEvents = await this._readGnomeCalendarData();
+                events.push(...sqliteEvents);
+            } catch (error) {
+                console.log('At A Glance: SQLite fallback failed:', error);
+            }
+        }
+        
+        return events;
+    }
+
+    async _readCalendarServerData() {
+        const events = [];
+        
+        return new Promise((resolve, reject) => {
+            try {
+                console.log('At A Glance: Connecting to GNOME Shell Calendar Server...');
+                
+                // Create D-Bus proxy for calendar server
+                const proxy = Gio.DBusProxy.new_for_bus_sync(
+                    Gio.BusType.SESSION,
+                    Gio.DBusProxyFlags.NONE,
+                    null,
+                    'org.gnome.Shell.CalendarServer',
+                    '/org/gnome/Shell/CalendarServer',
+                    'org.gnome.Shell.CalendarServer',
+                    null
+                );
+                
+                if (!proxy) {
+                    throw new Error('Failed to create D-Bus proxy for calendar server');
+                }
+                
+                console.log('At A Glance: Calendar Server proxy created successfully');
+                
+                // Check if calendar server has calendars available
+                const hasCalendars = proxy.get_cached_property('HasCalendars');
+                console.log(`At A Glance: Calendar Server HasCalendars: ${hasCalendars ? hasCalendars.unpack() : 'unknown'}`);
+                
+                // Set up time range (next 30 days)
+                const now = Math.floor(Date.now() / 1000); // Unix timestamp in seconds
+                const thirtyDaysLater = now + (30 * 24 * 60 * 60);
+                
+                console.log(`At A Glance: Setting time range from ${now} to ${thirtyDaysLater}`);
+                
+                // Listen for events before setting time range
+                const eventAddedSignalId = proxy.connectSignal('EventsAddedOrUpdated', (proxy, sender, [eventArray]) => {
+                    console.log(`At A Glance: Received ${eventArray.length} events from Calendar Server`);
+                    
+                    for (const eventData of eventArray) {
+                        try {
+                            const event = this._processCalendarServerEvent(eventData);
+                            if (event) {
+                                events.push(event);
+                                console.log(`At A Glance: Processed event: ${event.title}`);
+                            }
+                        } catch (error) {
+                            console.log('At A Glance: Error processing calendar server event:', error);
+                        }
+                    }
+                    
+                    // Disconnect signal and resolve
+                    proxy.disconnectSignal(eventAddedSignalId);
+                    console.log(`At A Glance: Calendar Server integration complete - found ${events.length} events`);
+                    resolve(events);
+                });
+                
+                // Set time range to trigger event loading
+                proxy.call(
+                    'SetTimeRange',
+                    GLib.Variant.new('(xxb)', [now, thirtyDaysLater, true]),
+                    Gio.DBusCallFlags.NONE,
+                    -1,
+                    null,
+                    (source, result) => {
+                        try {
+                            proxy.call_finish(result);
+                            console.log('At A Glance: SetTimeRange call successful');
+                            
+                            // If no events are received within 2 seconds, resolve with empty array
+                            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
+                                proxy.disconnectSignal(eventAddedSignalId);
+                                console.log('At A Glance: Timeout reached, resolving with current events');
+                                resolve(events);
+                                return GLib.SOURCE_REMOVE;
+                            });
+                        } catch (error) {
+                            console.log('At A Glance: SetTimeRange call failed:', error);
+                            proxy.disconnectSignal(eventAddedSignalId);
                             reject(error);
-                        } else {
-                            log('At A Glance: Calendar time range set successfully');
-                            resolve(result);
                         }
                     }
                 );
-            });
-            
-            // Return cached events (will be updated via signal)
-            return this._filterEventsByTimeRange(this.cachedEvents, sinceUnix, untilUnix);
-            
-        } catch (e) {
-            log(`At A Glance: Error getting calendar events: ${e}`);
-            return [];
-        }
-    },
-
-    async getTodaysEvents() {
-        const allEvents = await this.getUpcomingEvents(24);
-        const today = GLib.DateTime.new_now_local();
-        
-        return allEvents.filter(event => {
-            const eventDate = GLib.DateTime.new_from_unix_local(event.startTime);
-            return eventDate.get_year() === today.get_year() &&
-                   eventDate.get_month() === today.get_month() &&
-                   eventDate.get_day_of_month() === today.get_day_of_month();
+                
+            } catch (error) {
+                console.log('At A Glance: Calendar Server integration error:', error);
+                reject(error);
+            }
         });
-    },
+    }
 
-    async getNextEvent() {
-        const events = await this.getUpcomingEvents(24);
-        const now = GLib.DateTime.new_now_local().to_unix();
-        
-        // Find the next upcoming event that hasn't started yet
-        return events.find(event => event.startTime > now);
-    },
-
-    _onEventsUpdated(proxy, sender, [events]) {
+    _processCalendarServerEvent(eventData) {
         try {
-            log(`At A Glance: Received ${events.length} calendar events`);
+            // Calendar server event structure: (uid, summary, start_time, end_time, properties)
+            const [uid, summary, startTime, endTime, properties] = eventData;
             
-            // Parse events from D-Bus format
-            this.cachedEvents = events.map(event => this._parseEventFromDbus(event));
+            if (!summary || summary.trim() === '') {
+                return null; // Skip events without summary
+            }
             
-            // Log events for debugging
-            this.cachedEvents.forEach(event => {
-                log(`At A Glance: Calendar Event: ${event.summary} at ${event.timeString}`);
-            });
+            // Convert Unix timestamps to JavaScript dates
+            const start = new Date(startTime * 1000);
+            const end = new Date(endTime * 1000);
+            const now = new Date();
             
-        } catch (e) {
-            log(`At A Glance: Error processing calendar events: ${e}`);
-        }
-    },
-
-    _parseEventFromDbus(eventData) {
-        try {
-            // D-Bus event format: (string uid, string summary, int64 start_time, int64 end_time, GVariant extra_info)
-            const [uid, summary, startTime, endTime, extraInfo] = eventData;
+            // Extract additional properties
+            const description = properties.description ? properties.description.unpack() : '';
+            const location = properties.location ? properties.location.unpack() : null;
+            const isAllDay = properties.allDay ? properties.allDay.unpack() : false;
             
-            // Parse extra info (properties)
-            const properties = extraInfo || {};
-            const location = properties['location'] ? properties['location'].unpack() : '';
-            const description = properties['description'] ? properties['description'].unpack() : '';
-            const isAllDay = properties['is-all-day'] ? properties['is-all-day'].unpack() : false;
-            
-            // Format times
-            const startDateTime = GLib.DateTime.new_from_unix_local(startTime);
-            const endDateTime = GLib.DateTime.new_from_unix_local(endTime);
-            
-            return {
-                uid: uid,
-                summary: summary,
-                location: location,
+            // Create processed event object
+            const event = {
+                id: uid || `calendar_server_${Date.now()}`,
+                title: summary,
                 description: description,
-                startTime: startTime,
-                endTime: endTime,
-                isAllDay: isAllDay,
-                timeString: isAllDay ? 'All day' : startDateTime.format('%l:%M %p'),
-                dateString: startDateTime.format('%A, %B %e'),
-                duration: Math.round((endTime - startTime) / 60), // duration in minutes
+                start: start.toISOString(),
+                end: end.toISOString(),
+                location: location,
+                source: 'GNOME Calendar Server',
+                features: {
+                    isAllDay: isAllDay,
+                    hasAttendees: false,
+                    categories: [this.eventFilter.categorizeEvent({
+                        title: summary,
+                        description: description
+                    })],
+                    timeFeatures: {
+                        isToday: this._isSameDay(start, now),
+                        isTomorrow: this._isTomorrow(start, now),
+                        isUpcoming: start > now,
+                        minutesUntil: Math.floor((start - now) / (1000 * 60))
+                    },
+                    confidence: 1.0 // Highest confidence for calendar server data
+                },
+                processed: new Date().toISOString()
             };
-        } catch (e) {
-            log(`At A Glance: Error parsing event: ${e}`);
+            
+            return event;
+            
+        } catch (error) {
+            console.log('At A Glance: Error processing calendar server event:', error);
             return null;
         }
-    },
+    }
 
-    _filterEventsByTimeRange(events, sinceUnix, untilUnix) {
-        return events.filter(event => {
-            // Event overlaps with time range if it starts before range ends and ends after range starts
-            return event.startTime < untilUnix && event.endTime > sinceUnix;
-        });
-    },
-
-    // Format event for display
-    formatEventForDisplay(event) {
-        if (!event) return 'No upcoming events';
+    async _readEvolutionICS() {
+        const events = [];
+        const homeDir = GLib.get_home_dir();
+        const calendarPath = `${homeDir}/.local/share/evolution/calendar/system/calendar.ics`;
         
-        const now = GLib.DateTime.new_now_local().to_unix();
-        const minutesUntil = Math.round((event.startTime - now) / 60);
-        
-        let timeString;
-        if (minutesUntil < 0) {
-            timeString = 'Now';
-        } else if (minutesUntil < 60) {
-            timeString = `in ${minutesUntil}m`;
-        } else if (minutesUntil < 120) {
-            timeString = 'in 1h';
-        } else {
-            timeString = event.timeString;
+        try {
+            const file = Gio.File.new_for_path(calendarPath);
+            if (!file.query_exists(null)) {
+                console.log('At A Glance: Evolution calendar file not found');
+                return events;
+            }
+            
+            const [success, contents] = file.load_contents(null);
+            if (!success) {
+                console.log('At A Glance: Could not read Evolution calendar file');
+                return events;
+            }
+            
+            const icsContent = new TextDecoder().decode(contents);
+            const parsedEvents = this._parseICSContent(icsContent);
+            events.push(...parsedEvents);
+            
+            console.log(`At A Glance: Found ${parsedEvents.length} events in Evolution calendar`);
+        } catch (error) {
+            console.log('At A Glance: Error reading Evolution calendar:', error);
         }
+        
+        return events;
+    }
+
+    async _readGnomeCalendarData() {
+        const events = [];
+        const homeDir = GLib.get_home_dir();
+        
+        // Try to read from Evolution sources configuration
+        const sourcesDir = `${homeDir}/.config/evolution/sources`;
+        
+        try {
+            const sourcesDirectory = Gio.File.new_for_path(sourcesDir);
+            if (!sourcesDirectory.query_exists(null)) {
+                console.log('At A Glance: Evolution sources directory not found');
+                return events;
+            }
+            
+            const enumerator = sourcesDirectory.enumerate_children('standard::name,standard::type', Gio.FileQueryInfoFlags.NONE, null);
+            let info;
+            
+            while ((info = enumerator.next_file(null)) !== null) {
+                const fileName = info.get_name();
+                if (fileName.endsWith('.source')) {
+                    const sourceEvents = await this._readSourceFile(sourcesDir, fileName);
+                    events.push(...sourceEvents);
+                }
+            }
+        } catch (error) {
+            console.log('At A Glance: Error reading Evolution sources:', error);
+        }
+        
+        return events;
+    }
+
+    async _readSourceFile(sourcesDir, fileName) {
+        const events = [];
+        
+        try {
+            const sourceFile = Gio.File.new_for_path(`${sourcesDir}/${fileName}`);
+            const [success, contents] = sourceFile.load_contents(null);
+            
+            if (success) {
+                const sourceContent = new TextDecoder().decode(contents);
+                
+                // Check if this is a calendar source
+                if (sourceContent.includes('[Calendar]') && sourceContent.includes('Enabled=true')) {
+                    console.log(`At A Glance: Found calendar source: ${fileName}`);
+                    
+                    // Try to find corresponding calendar data
+                    const sourceEvents = await this._findCalendarDataForSource(fileName);
+                    events.push(...sourceEvents);
+                }
+            }
+        } catch (error) {
+            console.log(`At A Glance: Error reading source ${fileName}:`, error);
+        }
+        
+        return events;
+    }
+
+    async _findCalendarDataForSource(sourceFileName) {
+        const events = [];
+        const homeDir = GLib.get_home_dir();
+        
+        // Remove .source extension to get the source ID
+        const sourceId = sourceFileName.replace('.source', '');
+        
+        // Try multiple potential locations for calendar data
+        const possiblePaths = [
+            `${homeDir}/.local/share/evolution/calendar/${sourceId}/calendar.ics`,
+            `${homeDir}/.cache/evolution/calendar/${sourceId}/cache.db`,
+            `${homeDir}/.local/share/evolution/calendar/${sourceId}.ics`
+        ];
+        
+        // Also check all cache directories for any calendar data
+        try {
+            const cacheDir = `${homeDir}/.cache/evolution/calendar`;
+            const cacheDirectory = Gio.File.new_for_path(cacheDir);
+            if (cacheDirectory.query_exists(null)) {
+                const enumerator = cacheDirectory.enumerate_children('standard::name,standard::type', Gio.FileQueryInfoFlags.NONE, null);
+                let info;
+                while ((info = enumerator.next_file(null)) !== null) {
+                    const dirName = info.get_name();
+                    if (info.get_file_type() === Gio.FileType.DIRECTORY && dirName !== 'trash') {
+                        possiblePaths.push(`${cacheDir}/${dirName}/cache.db`);
+                    }
+                }
+            }
+        } catch (error) {
+            console.log('At A Glance: Error scanning cache directories:', error);
+        }
+        
+        for (const path of possiblePaths) {
+            try {
+                const file = Gio.File.new_for_path(path);
+                if (file.query_exists(null)) {
+                    console.log(`At A Glance: Found calendar data at: ${path}`);
+                    
+                    if (path.endsWith('.ics')) {
+                        const [success, contents] = file.load_contents(null);
+                        if (success) {
+                            const icsContent = new TextDecoder().decode(contents);
+                            const parsedEvents = this._parseICSContent(icsContent);
+                            events.push(...parsedEvents);
+                            console.log(`At A Glance: Parsed ${parsedEvents.length} events from ${path}`);
+                        }
+                    } else if (path.endsWith('cache.db')) {
+                        // Try to read SQLite database using subprocess
+                        const dbEvents = await this._readSQLiteCalendarCache(path);
+                        events.push(...dbEvents);
+                        console.log(`At A Glance: Found ${dbEvents.length} events in SQLite cache ${path}`);
+                    }
+                }
+            } catch (error) {
+                console.log(`At A Glance: Error reading ${path}:`, error);
+            }
+        }
+        
+        return events;
+    }
+
+    _parseICSContent(icsContent) {
+        const events = [];
+        const lines = icsContent.split('\n');
+        let currentEvent = null;
+        
+        console.log(`At A Glance: Parsing ICS content with ${lines.length} lines`);
+        
+        for (let line of lines) {
+            line = line.trim();
+            
+            if (line === 'BEGIN:VEVENT') {
+                currentEvent = {};
+                console.log('At A Glance: Found BEGIN:VEVENT');
+            } else if (line === 'END:VEVENT' && currentEvent) {
+                console.log(`At A Glance: Found END:VEVENT - summary: ${currentEvent.summary}, dtstart: ${currentEvent.dtstart}`);
+                if (currentEvent.summary && currentEvent.dtstart) {
+                    events.push(this._processICSEvent(currentEvent));
+                    console.log(`At A Glance: Successfully processed event: ${currentEvent.summary}`);
+                } else {
+                    console.log(`At A Glance: Skipping event - missing summary or dtstart`);
+                }
+                currentEvent = null;
+            } else if (currentEvent && line.includes(':')) {
+                const [keyPart, ...valueParts] = line.split(':');
+                const value = valueParts.join(':');
+                // Handle ICS properties with parameters like "DTSTART;VALUE=DATE"
+                const key = keyPart.split(';')[0];
+                
+                switch (key) {
+                    case 'SUMMARY':
+                        currentEvent.summary = value;
+                        break;
+                    case 'DESCRIPTION':
+                        currentEvent.description = value;
+                        break;
+                    case 'DTSTART':
+                        currentEvent.dtstart = value;
+                        break;
+                    case 'DTEND':
+                        currentEvent.dtend = value;
+                        break;
+                    case 'LOCATION':
+                        currentEvent.location = value;
+                        break;
+                    case 'UID':
+                        currentEvent.uid = value;
+                        break;
+                }
+            }
+        }
+        
+        console.log(`At A Glance: Parsed ${events.length} events from ICS content`);
+        return events;
+    }
+
+    _processICSEvent(icsEvent) {
+        const startTime = this._parseICSDateTime(icsEvent.dtstart);
+        const endTime = this._parseICSDateTime(icsEvent.dtend || icsEvent.dtstart);
+        const now = new Date();
         
         return {
-            short: `${event.summary} ${timeString}`,
-            full: `${event.summary} at ${event.timeString}${event.location ? ` - ${event.location}` : ''}`,
-            details: {
-                summary: event.summary,
-                time: timeString,
-                location: event.location,
-                duration: event.duration
-            }
+            id: icsEvent.uid || `event_${Date.now()}`,
+            title: icsEvent.summary,
+            description: icsEvent.description || '',
+            start: startTime.toISOString(),
+            end: endTime.toISOString(),
+            location: icsEvent.location || null,
+            features: {
+                isAllDay: icsEvent.dtstart.length === 8, // YYYYMMDD format for all-day
+                hasAttendees: false,
+                categories: [this.eventFilter.categorizeEvent(icsEvent)],
+                timeFeatures: {
+                    isToday: this._isSameDay(startTime, now),
+                    isTomorrow: this._isTomorrow(startTime, now),
+                    isUpcoming: startTime > now,
+                    minutesUntil: Math.floor((startTime - now) / (1000 * 60))
+                },
+                confidence: 0.8
+            },
+            processed: new Date().toISOString()
         };
-    },
+    }
+
+    _parseICSDateTime(dateTimeString) {
+        // Handle different ICS datetime formats
+        if (dateTimeString.length === 8) {
+            // YYYYMMDD format (all-day event)
+            const year = parseInt(dateTimeString.substring(0, 4));
+            const month = parseInt(dateTimeString.substring(4, 6)) - 1; // Month is 0-based
+            const day = parseInt(dateTimeString.substring(6, 8));
+            return new Date(year, month, day);
+        } else if (dateTimeString.includes('T')) {
+            // YYYYMMDDTHHMMSS format
+            const dateTime = dateTimeString.replace(/[TZ]/g, '');
+            const year = parseInt(dateTime.substring(0, 4));
+            const month = parseInt(dateTime.substring(4, 6)) - 1;
+            const day = parseInt(dateTime.substring(6, 8));
+            const hour = parseInt(dateTime.substring(8, 10));
+            const minute = parseInt(dateTime.substring(10, 12));
+            const second = parseInt(dateTime.substring(12, 14)) || 0;
+            return new Date(year, month, day, hour, minute, second);
+        }
+        
+        // Fallback to current date
+        return new Date();
+    }
+
+    _isSameDay(date1, date2) {
+        return date1.getFullYear() === date2.getFullYear() &&
+               date1.getMonth() === date2.getMonth() &&
+               date1.getDate() === date2.getDate();
+    }
+
+    _isTomorrow(date, today) {
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        return this._isSameDay(date, tomorrow);
+    }
+
+    _filterAndProcessEvents(events) {
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const nextWeek = new Date(today);
+        nextWeek.setDate(nextWeek.getDate() + 7);
+        
+        return events
+            .filter(event => !this.eventFilter.shouldExclude(event))
+            .filter(event => new Date(event.start) >= today) // Include today's events
+            .sort((a, b) => {
+                const dateA = new Date(a.start);
+                const dateB = new Date(b.start);
+                
+                // Prioritize today's events, then tomorrow's, then this week's
+                const isAToday = dateA >= today && dateA < tomorrow;
+                const isBToday = dateB >= today && dateB < tomorrow;
+                const isATomorrow = dateA >= tomorrow && dateA < new Date(tomorrow.getTime() + 24*60*60*1000);
+                const isBTomorrow = dateB >= tomorrow && dateB < new Date(tomorrow.getTime() + 24*60*60*1000);
+                
+                if (isAToday && !isBToday) return -1;
+                if (isBToday && !isAToday) return 1;
+                if (isATomorrow && !isBTomorrow && !isBToday) return -1;
+                if (isBTomorrow && !isATomorrow && !isAToday) return 1;
+                
+                // Within same priority group, sort by time
+                return dateA - dateB;
+            })
+            .slice(0, 15); // Increase limit to 15 events
+    }
+
+    async _readSQLiteCalendarCache(dbPath) {
+        const events = [];
+        
+        try {
+            console.log(`At A Glance: Attempting to read SQLite database: ${dbPath}`);
+            
+            // Check if sqlite3 is available using GLib.spawn_command_line_sync
+            const [testSuccess, testStdout] = GLib.spawn_command_line_sync('which sqlite3');
+            
+            if (!testSuccess || !testStdout) {
+                console.log(`At A Glance: sqlite3 not available, skipping database ${dbPath}`);
+                return events;
+            }
+            
+            console.log(`At A Glance: sqlite3 found at: ${new TextDecoder().decode(testStdout).trim()}`);
+            
+            // Use sqlite3 command with separator to properly handle multi-line results
+            // Get current date to filter for upcoming events
+            const today = new Date();
+            const todayStr = today.toISOString().substring(0, 10).replace(/-/g, ''); // YYYYMMDD format
+            
+            const sqliteCommand = `sqlite3 "${dbPath}" "SELECT '=====EVENT_SEPARATOR=====' || ECacheOBJ || '=====EVENT_SEPARATOR=====' FROM ECacheObjects WHERE ECacheOBJ LIKE '%VEVENT%' AND (ECacheOBJ LIKE '%DTSTART%${todayStr}%' OR ECacheOBJ LIKE '%DTSTART:${todayStr}%' OR ECacheOBJ NOT LIKE '%DTSTART%2024%') ORDER BY ECacheOBJ LIMIT 25;"`;
+            console.log(`At A Glance: Running SQLite command for events from ${todayStr} onwards with separators`);
+            
+            const [success, stdout, stderr] = GLib.spawn_command_line_sync(sqliteCommand);
+            
+            if (success && stdout) {
+                const output = new TextDecoder().decode(stdout);
+                console.log(`At A Glance: Raw SQLite output length: ${output.length} characters`);
+                
+                // Split by event separators to get individual events
+                const eventBlocks = output.split('=====EVENT_SEPARATOR=====').filter(block => block.trim().length > 0);
+                console.log(`At A Glance: Found ${eventBlocks.length} event blocks from ${dbPath}`);
+                
+                for (const eventBlock of eventBlocks) {
+                    try {
+                        const icsData = eventBlock.trim();
+                        if (icsData && icsData.includes('VEVENT')) {
+                            console.log(`At A Glance: Processing event block with ${icsData.split('\n').length} lines`);
+                            const parsedEvents = this._parseICSContent(icsData);
+                            events.push(...parsedEvents);
+                            console.log(`At A Glance: Parsed ${parsedEvents.length} events from event block`);
+                            
+                            // Log each found event for debugging
+                            for (const event of parsedEvents) {
+                                console.log(`At A Glance: Found event: "${event.title}" on ${event.start} from ${event.source}`);
+                            }
+                        }
+                    } catch (error) {
+                        console.log(`At A Glance: Error parsing event block:`, error);
+                    }
+                }
+            } else {
+                const errorOutput = stderr ? new TextDecoder().decode(stderr) : 'Unknown error';
+                console.log(`At A Glance: SQLite query failed for ${dbPath}: ${errorOutput}`);
+            }
+        } catch (error) {
+            console.log(`At A Glance: Error accessing SQLite database ${dbPath}:`, error);
+        }
+        
+        return events;
+    }
 
     destroy() {
-        if (this.eventsSignalId) {
-            this.calendarProxy.disconnectSignal(this.eventsSignalId);
-            this.eventsSignalId = null;
-        }
-        this.calendarProxy = null;
-        this.cachedEvents = [];
+        this.cache.clear();
     }
-};
+}
 
-// Updated DataCollector.getCalendarEvents() for the main extension
-DataCollector.getCalendarEvents = async function() {
-    try {
-        // Initialize calendar integration if not already done
-        if (!CalendarIntegration.calendarProxy) {
-            const success = CalendarIntegration.initialize();
-            if (!success) {
-                log('At A Glance: Failed to initialize calendar integration');
-                return [];
-            }
-        }
-        
-        // Get today's events
-        const events = await CalendarIntegration.getTodaysEvents();
-        
-        log(`At A Glance: Found ${events.length} events for today`);
-        
-        // Format for the extension
-        return events.map(event => ({
-            time: event.timeString,
-            title: event.summary,
-            location: event.location,
-            isAllDay: event.isAllDay,
-            raw: event // Keep raw data for Claude
-        }));
-    } catch (e) {
-        log(`At A Glance: Error getting calendar events: ${e}`);
-        // Return empty array as fallback
-        return [];
-    }
-};
+// Legacy support for extension.js DataCollector
+export function createCalendarDataCollector() {
+    return new CalendarDataCollector();
+}

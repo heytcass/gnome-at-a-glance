@@ -10,6 +10,9 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+// Import calendar integration
+import { CalendarDataCollector } from './calendar-integration.js';
+
 // Helper function to get API key from config file
 function getApiKey(service) {
     try {
@@ -121,151 +124,13 @@ const DataCollector = {
     },
 
     async getCalendarEvents() {
-        try {
-            // Import EDS libraries dynamically when needed
-            const ECal = await import('gi://ECal?version=2.0').then(m => m.default);
-            const EDataServer = await import('gi://EDataServer?version=1.2').then(m => m.default);
-            const ICalGLib = await import('gi://ICalGLib?version=3.0').then(m => m.default);
-            
-            console.log('At A Glance: EDS libraries loaded successfully');
-            
-            // Create registry with Promise wrapper
-            const registry = await new Promise((resolve, reject) => {
-                const cancellable = new Gio.Cancellable();
-                EDataServer.SourceRegistry.new(cancellable, (source, result) => {
-                    try {
-                        const registry = EDataServer.SourceRegistry.new_finish(result);
-                        resolve(registry);
-                    } catch (error) {
-                        reject(error);
-                    }
-                });
-            });
-            
-            const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
-            console.log(`At A Glance: Found ${sources.length} calendar sources`);
-            
-            const events = [];
-            const now = new Date();
-            const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-            const todayEnd = new Date(todayStart);
-            todayEnd.setDate(todayEnd.getDate() + 1);
-            
-            for (const source of sources) {
-                try {
-                    if (!source.get_enabled()) continue;
-                    
-                    console.log(`At A Glance: Connecting to calendar: ${source.get_display_name()}`);
-                    
-                    // Connect to calendar client with Promise wrapper
-                    const client = await new Promise((resolve, reject) => {
-                        const cancellable = new Gio.Cancellable();
-                        ECal.Client.connect(
-                            source,
-                            ECal.ClientSourceType.EVENTS,
-                            30,
-                            cancellable,
-                            (source, result) => {
-                                try {
-                                    const client = ECal.Client.connect_finish(result);
-                                    resolve(client);
-                                } catch (error) {
-                                    resolve(null); // Don't reject, just skip this source
-                                }
-                            }
-                        );
-                    });
-                    
-                    if (!client) continue;
-                    
-                    // Get events with Promise wrapper
-                    const components = await new Promise((resolve, reject) => {
-                        const cancellable = new Gio.Cancellable();
-                        const startTime = Math.floor(todayStart.getTime() / 1000);
-                        const endTime = Math.floor(todayEnd.getTime() / 1000);
-                        const query = `(occur-in-time-range? (make-time \"${startTime}\") (make-time \"${endTime}\"))`;
-                        
-                        client.get_object_list_as_comps(query, cancellable, (client, result) => {
-                            try {
-                                const [success, comps] = client.get_object_list_as_comps_finish(result);
-                                resolve(success ? comps || [] : []);
-                            } catch (error) {
-                                resolve([]);
-                            }
-                        });
-                    });
-                    
-                    // Process events
-                    for (const comp of components) {
-                        try {
-                            const event = comp.get_first_component(ICalGLib.ComponentKind.VEVENT);
-                            if (event) {
-                                const summary = event.get_summary();
-                                const dtstart = event.get_dtstart();
-                                const location = event.get_location();
-                                
-                                if (summary && dtstart) {
-                                    const startDate = new Date(
-                                        dtstart.get_year(),
-                                        dtstart.get_month() - 1,
-                                        dtstart.get_day(),
-                                        dtstart.get_hour(),
-                                        dtstart.get_minute()
-                                    );
-                                    
-                                    const timeDiff = startDate - now;
-                                    const minutesUntil = Math.round(timeDiff / (1000 * 60));
-                                    
-                                    let timeDisplay;
-                                    if (minutesUntil < -60) {
-                                        timeDisplay = 'Past';
-                                    } else if (minutesUntil < 0) {
-                                        timeDisplay = 'Now';
-                                    } else if (minutesUntil < 60) {
-                                        timeDisplay = `${minutesUntil}m`;
-                                    } else {
-                                        timeDisplay = startDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                                    }
-                                    
-                                    events.push({
-                                        time: timeDisplay,
-                                        title: summary,
-                                        location: location || '',
-                                        startTime: startDate,
-                                        minutesUntil: minutesUntil
-                                    });
-                                }
-                            }
-                        } catch (e) {
-                            console.log('At A Glance: Error parsing event:', e);
-                        }
-                    }
-                    
-                } catch (e) {
-                    console.log(`At A Glance: Error accessing calendar ${source.get_display_name()}:`, e);
-                }
-            }
-            
-            // Sort events by start time
-            events.sort((a, b) => a.startTime - b.startTime);
-            
-            if (events.length > 0) {
-                console.log(`At A Glance: Successfully retrieved ${events.length} events`);
-                return events.slice(0, 3);
-            } else {
-                console.log('At A Glance: No events found for today');
-                return [];
-            }
-            
-        } catch (error) {
-            console.error('At A Glance: Calendar integration failed:', error);
-            // Fallback to show calendar is available but had issues
-            return [{
-                time: 'Setup',
-                title: 'Calendar integration available',
-                location: 'Add events in GNOME Calendar'
-            }];
+        console.log('At A Glance: DataCollector.getCalendarEvents() called');
+        if (!this.calendarCollector) {
+            console.log('At A Glance: Creating new CalendarDataCollector');
+            this.calendarCollector = new CalendarDataCollector();
         }
+        console.log('At A Glance: Calling calendarCollector.getCalendarEvents()');
+        return await this.calendarCollector.getCalendarEvents();
     },
 
     async getTasks() {
@@ -539,12 +404,19 @@ class AtAGlanceIndicator extends PanelMenu.Button {
 
     async _updateData() {
         try {
+            console.log('At A Glance: Starting _updateData()');
             const data = {
                 weather: await DataCollector.getWeather(),
                 calendar: await DataCollector.getCalendarEvents(),
                 tasks: await DataCollector.getTasks(),
                 system: await DataCollector.getSystemInfo()
             };
+            console.log('At A Glance: Data collection complete:', { 
+                weather: data.weather.temp,
+                calendar: data.calendar.length,
+                tasks: data.tasks.length,
+                system: data.system.nixosStatus
+            });
 
             const insights = await DataCollector.getClaudeInsights(data);
             data.insights = insights;
@@ -569,7 +441,9 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         
         const nextEvent = data.calendar[0];
         if (nextEvent && data.calendar.length > 0) {
-            this._calendarItem.label.set_text(`📅 Next: ${nextEvent.title} @ ${nextEvent.time}`);
+            const startTime = new Date(nextEvent.start);
+            const timeString = startTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            this._calendarItem.label.set_text(`📅 Next: ${nextEvent.title} @ ${timeString}`);
             this._calendarItem.actor.show();
         } else {
             this._calendarItem.actor.hide();
@@ -608,17 +482,21 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         // Imminent calendar events
         const nextEvent = data.calendar[0];
         if (nextEvent && data.calendar.length > 0) {
-            const eventTime = nextEvent.time;
-            if (eventTime && eventTime.includes('min')) {
-                return `🚨 ${nextEvent.title} in ${eventTime}`;
-            } else if (eventTime && (eventTime.includes('Now') || eventTime.includes('Soon'))) {
+            const startTime = new Date(nextEvent.start);
+            const now = new Date();
+            const minutesUntil = Math.floor((startTime - now) / (1000 * 60));
+            const timeString = startTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            
+            if (minutesUntil <= 0) {
                 return `🚨 ${nextEvent.title} starting`;
-            } else if (nextEvent.location && nextEvent.location.includes('Virtual')) {
-                return `🎥 ${nextEvent.title} @ ${eventTime}`;
+            } else if (minutesUntil <= 15) {
+                return `🚨 ${nextEvent.title} in ${minutesUntil}min`;
+            } else if (nextEvent.location && nextEvent.location.toLowerCase().includes('virtual')) {
+                return `🎥 ${nextEvent.title} @ ${timeString}`;
             } else if (nextEvent.location) {
-                return `📍 ${nextEvent.title} @ ${eventTime}`;
+                return `📍 ${nextEvent.title} @ ${timeString}`;
             } else {
-                return `📅 ${nextEvent.title} @ ${eventTime}`;
+                return `📅 ${nextEvent.title} @ ${timeString}`;
             }
         }
         
@@ -694,6 +572,10 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         if (this._updateTimer) {
             GLib.source_remove(this._updateTimer);
             this._updateTimer = null;
+        }
+        if (DataCollector.calendarCollector) {
+            DataCollector.calendarCollector.destroy();
+            DataCollector.calendarCollector = null;
         }
         console.log('At A Glance: Widget destroyed');
         super.destroy();
