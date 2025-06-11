@@ -192,7 +192,7 @@ const DataCollector = {
             const weatherTemp = data.weather.temp;
             const weatherCondition = data.weather.condition;
             
-            const prompt = `You are an AI assistant providing contextual insights. Based on this ${timeContext} situation, give ONE actionable insight (max 60 chars):
+            const prompt = `You are an AI assistant providing contextual insights for a desktop widget. Based on this ${timeContext} situation, provide ONE actionable insight or observation (max 60 characters):
 
 Context:
 - Weather: ${weatherTemp}°F, ${weatherCondition}
@@ -200,11 +200,15 @@ Context:
 - Tasks: ${urgentTasks.length > 0 ? `Urgent: ${urgentTaskTitles}` : data.tasks.length + ' tasks pending'}
 - Time: ${timeContext}
 
-Provide ONE smart suggestion or observation. Examples:
-"Focus on: [task name] this morning"
-"Perfect weather for outdoor meetings"
-"Light schedule - ideal for focused work"
-"Rainy day - stay productive indoors"
+Be creative and contextual. Consider patterns like:
+- Productivity suggestions based on schedule/weather
+- Time management advice
+- Weather-influenced recommendations  
+- Priority guidance based on tasks
+- Motivational insights
+- Contextual observations
+
+Your response should be helpful, concise, and relevant to the current situation. Avoid being repetitive or overly formulaic.
 
 Response:`;
 
@@ -299,7 +303,7 @@ Response:`;
                 }
             }
             
-            const prompt = `You are an AI assistant that decides what's most important to display on a GNOME desktop panel button. 
+            const prompt = `You are an AI assistant that decides what's most important to display on a GNOME desktop panel button.
 
 Current Context (${timeContext}):
 • Calendar: ${calendarContext}
@@ -307,18 +311,15 @@ Current Context (${timeContext}):
 • Weather: ${data.weather.temp}°F, ${data.weather.condition}
 • System: ${data.system.nixosStatus}, ${data.system.battery}% battery
 
-Instructions:
-1. Choose the SINGLE most important thing to display right now
-2. Consider: urgency (time-sensitive), importance, and user context
-3. Format as a panel button display (emoji + brief text, max 35 characters)
-4. Use appropriate emoji: 🚨 (urgent), ⚡ (high priority), 📅 (calendar), 📋 (tasks), 🌤️ (weather)
+Choose the SINGLE most important thing to display right now based on:
+- Time sensitivity and urgency
+- User context and priorities
+- Relevance to current situation
 
-Examples:
-"🚨 Meeting in 5min"
-"⚡ Complete project proposal"
-"📅 Lunch @ 12:30"
-"📋 3 urgent tasks"
-"🌤️ 72°F Sunny"
+Format: emoji + brief text (max 35 characters)
+Use contextually appropriate emojis and be creative with your choices.
+
+Focus on what would be most helpful for the user to see at a glance right now.
 
 Response (just the display text):`;
 

@@ -3,7 +3,7 @@
 **Intelligent contextual information widget for GNOME Shell, inspired by Android's At A Glance widget**
 
 ![GNOME Shell Version](https://img.shields.io/badge/GNOME%20Shell-45%2B-blue)
-![License](https://img.shields.io/badge/License-GPL%203.0-green)
+![License](https://img.shields.io/badge/License-GPL%202.0+-green)
 ![NixOS](https://img.shields.io/badge/NixOS-Ready-blue)
 
 Brings the smart, contextual information display of Android's At A Glance widget to the GNOME desktop with AI-enhanced prioritization and desktop-specific integrations. Developed in Detroit, MI 🏙️
@@ -168,7 +168,9 @@ This extension brings the beloved contextual intelligence of **Android's At A Gl
 
 ## 📝 License
 
-GPL 3.0+ - See LICENSE file
+GPL-2.0-or-later - See LICENSE file
+
+This extension is distributed under the terms of the GNU General Public License v2.0 or later, as required by the GNOME Extensions directory.
 
 ## 🤝 Contributing
 

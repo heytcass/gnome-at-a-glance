@@ -45,6 +45,7 @@
             libsoup_2_4
             json-glib
             libsecret
+            sqlite
           ];
 
           # No build phase needed for GNOME shell extensions
@@ -132,6 +133,7 @@
             libsoup_2_4
             json-glib
             libsecret
+            sqlite
             
             # Development tools
             jq
@@ -241,6 +243,7 @@
                 pkgs.libsoup_2_4
                 pkgs.json-glib
                 pkgs.libsecret
+                pkgs.sqlite
               ];
 
               # Ensure required services are enabled
