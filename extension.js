@@ -252,6 +252,116 @@ Response:`;
         }
     },
 
+    async getClaudePrioritization(data) {
+        try {
+            const apiKey = getApiKey('claude');
+            if (!apiKey) {
+                return null; // Will trigger fallback logic
+            }
+
+            const now = new Date();
+            const hour = now.getHours();
+            const timeContext = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
+            
+            // Prepare detailed context for prioritization
+            let calendarContext = 'No upcoming events';
+            if (data.calendar.length > 0) {
+                const nextEvent = data.calendar[0];
+                const eventTime = new Date(nextEvent.start);
+                const minutesUntil = Math.floor((eventTime - now) / (1000 * 60));
+                const timeString = eventTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                
+                if (minutesUntil <= 15) {
+                    calendarContext = `URGENT: "${nextEvent.title}" starting in ${minutesUntil} minutes`;
+                } else if (minutesUntil <= 240) { // 4 hours
+                    calendarContext = `Next: "${nextEvent.title}" at ${timeString} (${Math.floor(minutesUntil/60)}h ${minutesUntil%60}m away)`;
+                } else {
+                    calendarContext = `Later today: "${nextEvent.title}" at ${timeString}`;
+                }
+                
+                if (nextEvent.location) {
+                    calendarContext += ` at ${nextEvent.location}`;
+                }
+            }
+            
+            let tasksContext = 'No tasks';
+            if (data.tasks.length > 0) {
+                const urgentTasks = data.tasks.filter(t => t.priority === 'high');
+                const mediumTasks = data.tasks.filter(t => t.priority === 'medium');
+                
+                if (urgentTasks.length > 0) {
+                    tasksContext = `URGENT: ${urgentTasks.slice(0, 2).map(t => `"${t.title}"`).join(', ')}`;
+                    if (urgentTasks.length > 2) tasksContext += ` (+${urgentTasks.length - 2} more urgent)`;
+                } else if (mediumTasks.length > 0) {
+                    tasksContext = `Medium priority: ${mediumTasks.slice(0, 2).map(t => `"${t.title}"`).join(', ')}`;
+                } else {
+                    tasksContext = `${data.tasks.length} tasks: ${data.tasks.slice(0, 2).map(t => `"${t.title}"`).join(', ')}`;
+                }
+            }
+            
+            const prompt = `You are an AI assistant that decides what's most important to display on a GNOME desktop panel button. 
+
+Current Context (${timeContext}):
+• Calendar: ${calendarContext}
+• Tasks: ${tasksContext}
+• Weather: ${data.weather.temp}°F, ${data.weather.condition}
+• System: ${data.system.nixosStatus}, ${data.system.battery}% battery
+
+Instructions:
+1. Choose the SINGLE most important thing to display right now
+2. Consider: urgency (time-sensitive), importance, and user context
+3. Format as a panel button display (emoji + brief text, max 35 characters)
+4. Use appropriate emoji: 🚨 (urgent), ⚡ (high priority), 📅 (calendar), 📋 (tasks), 🌤️ (weather)
+
+Examples:
+"🚨 Meeting in 5min"
+"⚡ Complete project proposal"
+"📅 Lunch @ 12:30"
+"📋 3 urgent tasks"
+"🌤️ 72°F Sunny"
+
+Response (just the display text):`;
+
+            const httpSession = new Soup.Session();
+            const message = Soup.Message.new('POST', 'https://api.anthropic.com/v1/messages');
+            
+            message.get_request_headers().append('Content-Type', 'application/json');
+            message.get_request_headers().append('anthropic-version', '2023-06-01');
+            message.get_request_headers().append('x-api-key', apiKey);
+            
+            const body = JSON.stringify({
+                model: 'claude-3-haiku-20240307',
+                messages: [{
+                    role: 'user',
+                    content: prompt
+                }],
+                max_tokens: 50
+            });
+            
+            const bodyBytes = new TextEncoder().encode(body);
+            message.set_request_body_from_bytes('application/json', GLib.Bytes.new(bodyBytes));
+
+            const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
+            if (message.get_status() === 200) {
+                const decoder = new TextDecoder('utf-8');
+                const responseText = decoder.decode(response.get_data());
+                const result = JSON.parse(responseText);
+                const content = result.content[0].text.trim();
+                
+                // Remove quotes if AI added them
+                const cleanContent = content.replace(/^["']|["']$/g, '');
+                
+                return cleanContent;
+            } else {
+                console.error('At A Glance: Claude API error:', message.get_status());
+                return null; // Will trigger fallback logic
+            }
+        } catch (error) {
+            console.error('At A Glance: Claude prioritization error:', error);
+            return null; // Will trigger fallback logic
+        }
+    },
+
     async getSystemInfo() {
         try {
             let batteryLevel = 'N/A';
@@ -422,15 +532,15 @@ class AtAGlanceIndicator extends PanelMenu.Button {
             data.insights = insights;
 
             this._lastData = data;
-            this._updateDisplay(data);
+            await this._updateDisplay(data);
         } catch (error) {
             console.error('At A Glance: Error updating data:', error);
             this.buttonText.set_text('📊 Error');
         }
     }
 
-    _updateDisplay(data) {
-        const urgentDisplay = this._getMostUrgentDisplay(data);
+    async _updateDisplay(data) {
+        const urgentDisplay = await this._getMostUrgentDisplay(data);
         this.buttonText.set_text(urgentDisplay);
 
         const aiText = data.insights.summary || 'Loading insights...';
@@ -468,8 +578,8 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         );
     }
 
-    _getMostUrgentDisplay(data) {
-        // System critical issues
+    async _getMostUrgentDisplay(data) {
+        // ALWAYS check for critical system issues first (immediate display, no AI needed)
         const lowBattery = data.system.battery !== 'N/A' && data.system.battery < 20;
         if (lowBattery) {
             return `🔋 ${data.system.battery}% battery`;
@@ -479,7 +589,22 @@ class AtAGlanceIndicator extends PanelMenu.Button {
             return `⚠️ ${data.system.nixosStatus}`;
         }
         
-        // Imminent calendar events
+        // Try AI-driven prioritization for everything else
+        try {
+            const aiResult = await DataCollector.getClaudePrioritization(data);
+            if (aiResult) {
+                return aiResult;
+            }
+        } catch (error) {
+            console.log('At A Glance: AI prioritization failed, using fallback logic:', error);
+        }
+        
+        // Fallback logic when AI is unavailable
+        return this._getFallbackDisplay(data);
+    }
+
+    _getFallbackDisplay(data) {
+        // Imminent calendar events (starting or within 15 minutes)
         const nextEvent = data.calendar[0];
         if (nextEvent && data.calendar.length > 0) {
             const startTime = new Date(nextEvent.start);
@@ -491,16 +616,10 @@ class AtAGlanceIndicator extends PanelMenu.Button {
                 return `🚨 ${nextEvent.title} starting`;
             } else if (minutesUntil <= 15) {
                 return `🚨 ${nextEvent.title} in ${minutesUntil}min`;
-            } else if (nextEvent.location && nextEvent.location.toLowerCase().includes('virtual')) {
-                return `🎥 ${nextEvent.title} @ ${timeString}`;
-            } else if (nextEvent.location) {
-                return `📍 ${nextEvent.title} @ ${timeString}`;
-            } else {
-                return `📅 ${nextEvent.title} @ ${timeString}`;
             }
         }
         
-        // Urgent tasks
+        // Urgent tasks (P1/P2 priority or overdue)
         const urgentTasks = data.tasks.filter(t => t.priority === 'high');
         if (urgentTasks.length > 0) {
             const firstUrgent = urgentTasks[0].title;
@@ -509,7 +628,46 @@ class AtAGlanceIndicator extends PanelMenu.Button {
             return `${icon} ${firstUrgent}${suffix}`;
         }
         
-        // Weather display
+        // Calendar events within next 4 hours (less urgent than tasks)
+        if (nextEvent && data.calendar.length > 0) {
+            const startTime = new Date(nextEvent.start);
+            const now = new Date();
+            const minutesUntil = Math.floor((startTime - now) / (1000 * 60));
+            const timeString = startTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            
+            if (minutesUntil <= 240) { // Within 4 hours
+                if (nextEvent.location && nextEvent.location.toLowerCase().includes('virtual')) {
+                    return `🎥 ${nextEvent.title} @ ${timeString}`;
+                } else if (nextEvent.location) {
+                    return `📍 ${nextEvent.title} @ ${timeString}`;
+                } else {
+                    return `📅 ${nextEvent.title} @ ${timeString}`;
+                }
+            }
+        }
+        
+        // Medium priority tasks if no urgent events/tasks
+        const mediumTasks = data.tasks.filter(t => t.priority === 'medium');
+        if (mediumTasks.length > 0) {
+            const firstMedium = mediumTasks[0].title;
+            const suffix = mediumTasks.length > 1 ? ` (+${mediumTasks.length - 1})` : '';
+            return `📋 ${firstMedium}${suffix}`;
+        }
+        
+        // Calendar events later today (after 4 hours)
+        if (nextEvent && data.calendar.length > 0) {
+            const startTime = new Date(nextEvent.start);
+            const now = new Date();
+            const timeString = startTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            
+            // Check if it's today
+            const isToday = startTime.toDateString() === now.toDateString();
+            if (isToday) {
+                return `📅 ${nextEvent.title} @ ${timeString}`;
+            }
+        }
+        
+        // Weather display (fallback)
         const temp = data.weather.temp;
         const condition = data.weather.condition;
         let weatherIcon = '📊';
