@@ -22,6 +22,7 @@
           "stylesheet.css"
           "calendar-integration.js"
           "todoist-integration.js"
+          "email-integration.js"
           "config.json"
         ];
 
@@ -65,6 +66,7 @@
             cp stylesheet.css $out/share/gnome-shell/extensions/${extensionUuid}/
             cp calendar-integration.js $out/share/gnome-shell/extensions/${extensionUuid}/
             cp todoist-integration.js $out/share/gnome-shell/extensions/${extensionUuid}/
+            cp email-integration.js $out/share/gnome-shell/extensions/${extensionUuid}/
             cp config.json $out/share/gnome-shell/extensions/${extensionUuid}/config.json.example
             
             # Copy README for reference

@@ -12,6 +12,8 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // Import calendar integration
 import { CalendarDataCollector } from './calendar-integration.js';
+// Import email integration (disabled for now)
+// import { EmailIntegration } from './email-integration.js';
 
 // Helper function to get API key from config file
 function getApiKey(service) {
@@ -38,8 +40,160 @@ function getApiKey(service) {
     }
 }
 
+// Claude API rate limiting and caching system
+class ClaudeRateLimit {
+    constructor() {
+        this.cache = new Map();
+        this.usageFile = GLib.get_home_dir() + '/.config/at-a-glance/claude-usage.json';
+        this.maxDailyRequests = 24;
+        this.cacheTimeoutMinutes = 60;
+        this.ensureUsageFile();
+    }
+
+    ensureUsageFile() {
+        try {
+            const configDir = GLib.get_home_dir() + '/.config/at-a-glance';
+            const dir = Gio.File.new_for_path(configDir);
+            if (!dir.query_exists(null)) {
+                dir.make_directory_with_parents(null);
+            }
+            
+            const usageFile = Gio.File.new_for_path(this.usageFile);
+            if (!usageFile.query_exists(null)) {
+                const initialData = {
+                    date: new Date().toDateString(),
+                    requests: 0,
+                    insights: 0,
+                    prioritization: 0
+                };
+                usageFile.replace_contents(
+                    JSON.stringify(initialData, null, 2),
+                    null, false,
+                    Gio.FileCreateFlags.NONE,
+                    null
+                );
+            }
+        } catch (error) {
+            console.error('At A Glance: Error ensuring usage file:', error);
+        }
+    }
+
+    getUsageData() {
+        try {
+            const usageFile = Gio.File.new_for_path(this.usageFile);
+            if (usageFile.query_exists(null)) {
+                const [success, contents] = usageFile.load_contents(null);
+                if (success) {
+                    const data = JSON.parse(new TextDecoder().decode(contents));
+                    const today = new Date().toDateString();
+                    
+                    // Reset if new day
+                    if (data.date !== today) {
+                        return {
+                            date: today,
+                            requests: 0,
+                            insights: 0,
+                            prioritization: 0
+                        };
+                    }
+                    return data;
+                }
+            }
+        } catch (error) {
+            console.error('At A Glance: Error reading usage data:', error);
+        }
+        return {
+            date: new Date().toDateString(),
+            requests: 0,
+            insights: 0,
+            prioritization: 0
+        };
+    }
+
+    saveUsageData(data) {
+        try {
+            const usageFile = Gio.File.new_for_path(this.usageFile);
+            usageFile.replace_contents(
+                JSON.stringify(data, null, 2),
+                null, false,
+                Gio.FileCreateFlags.NONE,
+                null
+            );
+        } catch (error) {
+            console.error('At A Glance: Error saving usage data:', error);
+        }
+    }
+
+    canMakeRequest(type = 'general') {
+        const usage = this.getUsageData();
+        const remaining = this.maxDailyRequests - usage.requests;
+        
+        if (remaining <= 0) {
+            console.log(`At A Glance: Daily Claude API limit reached (${usage.requests}/${this.maxDailyRequests})`);
+            return false;
+        }
+        
+        if (remaining <= 3) {
+            console.log(`At A Glance: Warning - Only ${remaining} Claude API requests remaining today`);
+        }
+        
+        return true;
+    }
+
+    recordRequest(type = 'general') {
+        const usage = this.getUsageData();
+        usage.requests++;
+        if (type === 'insights') usage.insights++;
+        if (type === 'prioritization') usage.prioritization++;
+        usage.date = new Date().toDateString();
+        this.saveUsageData(usage);
+        
+        console.log(`At A Glance: Claude API request recorded. Usage: ${usage.requests}/${this.maxDailyRequests} (${type})`);
+    }
+
+    getCached(key) {
+        const cached = this.cache.get(key);
+        if (cached) {
+            const ageMinutes = (Date.now() - cached.timestamp) / (1000 * 60);
+            if (ageMinutes < this.cacheTimeoutMinutes) {
+                console.log(`At A Glance: Using cached Claude response for ${key} (${Math.round(ageMinutes)}min old)`);
+                return cached.data;
+            } else {
+                this.cache.delete(key);
+                console.log(`At A Glance: Cache expired for ${key} (${Math.round(ageMinutes)}min old)`);
+            }
+        }
+        return null;
+    }
+
+    setCached(key, data) {
+        this.cache.set(key, {
+            data: data,
+            timestamp: Date.now()
+        });
+        console.log(`At A Glance: Cached Claude response for ${key}`);
+    }
+
+    getUsageStatus() {
+        const usage = this.getUsageData();
+        const remaining = this.maxDailyRequests - usage.requests;
+        return {
+            used: usage.requests,
+            remaining: remaining,
+            limit: this.maxDailyRequests,
+            insights: usage.insights,
+            prioritization: usage.prioritization,
+            resetTime: 'midnight'
+        };
+    }
+}
+
+// Global rate limiter instance
+const claudeRateLimit = new ClaudeRateLimit();
+
 // Data collection object
 const DataCollector = {
+    // emailCollector: null, // Disabled for now
     async getSmartLocation() {
         // 1. Check user config override first
         try {
@@ -172,6 +326,33 @@ const DataCollector = {
         }
     },
 
+    // Email integration disabled for now - too complex for initial implementation
+    /*
+    async getEmailData() {
+        try {
+            if (!this.emailCollector) {
+                console.log('At A Glance: Creating new EmailIntegration');
+                this.emailCollector = new EmailIntegration();
+            }
+            
+            console.log('At A Glance: Collecting email data...');
+            const emailSummary = await this.emailCollector.getEmailSummary();
+            console.log('At A Glance: Email data collected:', emailSummary);
+            
+            return emailSummary;
+        } catch (error) {
+            console.error('At A Glance: Email collection error:', error);
+            return {
+                total: 0,
+                vip: 0,
+                urgent: 0,
+                mostUrgent: null,
+                status: 'Email service unavailable'
+            };
+        }
+    },
+    */
+
     async getClaudeInsights(data) {
         try {
             const apiKey = getApiKey('claude');
@@ -182,6 +363,7 @@ const DataCollector = {
                 };
             }
 
+            // Create cache key based on current context
             const now = new Date();
             const hour = now.getHours();
             const timeContext = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
@@ -191,6 +373,25 @@ const DataCollector = {
             const urgentTaskTitles = urgentTasks.slice(0, 2).map(t => t.title).join(', ');
             const weatherTemp = data.weather.temp;
             const weatherCondition = data.weather.condition;
+            
+            // Create a cache key based on current context (rounded to nearest 10 minutes for better caching)
+            const roundedMinutes = Math.floor(now.getMinutes() / 10) * 10;
+            const cacheKey = `insights-${timeContext}-${hasEvents}-${urgentTasks.length}-${weatherTemp}-${now.toDateString()}-${hour}:${roundedMinutes}`;
+            
+            // Check cache first
+            const cached = claudeRateLimit.getCached(cacheKey);
+            if (cached) {
+                return cached;
+            }
+            
+            // Check rate limit
+            if (!claudeRateLimit.canMakeRequest('insights')) {
+                const usage = claudeRateLimit.getUsageStatus();
+                return {
+                    summary: `Daily AI limit reached (${usage.used}/${usage.limit})`,
+                    priority: 'Rate limited - resets at midnight'
+                };
+            }
             
             const prompt = `You are an AI assistant providing contextual insights for a desktop widget. Based on this ${timeContext} situation, provide ONE actionable insight or observation (max 60 characters):
 
@@ -231,16 +432,25 @@ Response:`;
             const bodyBytes = new TextEncoder().encode(body);
             message.set_request_body_from_bytes('application/json', GLib.Bytes.new(bodyBytes));
 
+            // Record the request before making it
+            claudeRateLimit.recordRequest('insights');
+
             const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
             if (message.get_status() === 200) {
                 const decoder = new TextDecoder('utf-8');
                 const responseText = decoder.decode(response.get_data());
                 const result = JSON.parse(responseText);
                 const content = result.content[0].text.trim();
-                return {
+                
+                const responseData = {
                     summary: content,
                     priority: '🤖 AI Analysis Complete'
                 };
+                
+                // Cache the successful response
+                claudeRateLimit.setCached(cacheKey, responseData);
+                
+                return responseData;
             } else {
                 return {
                     summary: `Claude API error: ${message.get_status()}`,
@@ -303,6 +513,23 @@ Response:`;
                 }
             }
             
+            // Create cache key for prioritization (more frequent updates than insights)
+            const roundedMinutes = Math.floor(now.getMinutes() / 5) * 5; // 5-minute windows for prioritization
+            const urgentCount = data.tasks.filter(t => t.priority === 'high').length;
+            const cacheKey = `priority-${timeContext}-${data.calendar.length}-${urgentCount}-${data.weather.temp}-${now.toDateString()}-${hour}:${roundedMinutes}`;
+            
+            // Check cache first
+            const cached = claudeRateLimit.getCached(cacheKey);
+            if (cached) {
+                return cached;
+            }
+            
+            // Check rate limit
+            if (!claudeRateLimit.canMakeRequest('prioritization')) {
+                console.log('At A Glance: Rate limit reached for prioritization, using fallback');
+                return null; // Will trigger fallback logic
+            }
+            
             const prompt = `You are an AI assistant that decides what's most important to display on a GNOME desktop panel button.
 
 Current Context (${timeContext}):
@@ -342,6 +569,9 @@ Response (just the display text):`;
             const bodyBytes = new TextEncoder().encode(body);
             message.set_request_body_from_bytes('application/json', GLib.Bytes.new(bodyBytes));
 
+            // Record the request before making it
+            claudeRateLimit.recordRequest('prioritization');
+
             const response = await httpSession.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null);
             if (message.get_status() === 200) {
                 const decoder = new TextDecoder('utf-8');
@@ -351,6 +581,9 @@ Response (just the display text):`;
                 
                 // Remove quotes if AI added them
                 const cleanContent = content.replace(/^["']|["']$/g, '');
+                
+                // Cache the successful response
+                claudeRateLimit.setCached(cacheKey, cleanContent);
                 
                 return cleanContent;
             } else {

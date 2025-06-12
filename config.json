@@ -14,8 +14,18 @@
     "calendar": true,
     "tasks": true,
     "todoist": true,
+    "email": true,
     "system_info": true,
     "claude_insights": true
   },
-  "location_override": null
+  "location_override": null,
+  "vip_email_senders": [
+    "@yourcompany.com",
+    "boss@company.com",
+    "noreply@calendar.google.com",
+    "noreply@github.com",
+    "security@",
+    "hr@",
+    "admin@"
+  ]
 }
