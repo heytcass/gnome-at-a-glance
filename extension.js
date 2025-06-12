@@ -12,6 +12,8 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // Import calendar integration
 import { CalendarDataCollector } from './calendar-integration.js';
+// Import meeting assistant
+import { MeetingAssistant } from './meeting-assistant.js';
 // Import email integration (disabled for now)
 // import { EmailIntegration } from './email-integration.js';
 
@@ -45,7 +47,7 @@ class ClaudeRateLimit {
     constructor() {
         this.cache = new Map();
         this.usageFile = GLib.get_home_dir() + '/.config/at-a-glance/claude-usage.json';
-        this.maxDailyRequests = 24;
+        this.maxDailyRequests = 100;
         this.cacheTimeoutMinutes = 60;
         this.ensureUsageFile();
     }
@@ -190,6 +192,9 @@ class ClaudeRateLimit {
 
 // Global rate limiter instance
 const claudeRateLimit = new ClaudeRateLimit();
+
+// Global meeting assistant instance
+const meetingAssistant = new MeetingAssistant();
 
 // Data collection object
 const DataCollector = {
@@ -393,11 +398,17 @@ const DataCollector = {
                 };
             }
             
+            // Enhanced meeting context for better insights
+            const meetingContext = data.meetings?.hasMeetings 
+                ? `${data.meetings.summary}${data.meetings.nextMeeting?.hasPreparation ? ' (prep needed)' : ''}`
+                : 'No meetings scheduled';
+
             const prompt = `You are an AI assistant providing contextual insights for a desktop widget. Based on this ${timeContext} situation, provide ONE actionable insight or observation (max 60 characters):
 
 Context:
 - Weather: ${weatherTemp}°F, ${weatherCondition}
-- Calendar: ${hasEvents ? 'Has scheduled events' : 'No events scheduled'}  
+- Calendar: ${hasEvents ? 'Has scheduled events' : 'No events scheduled'}
+- Meetings: ${meetingContext}
 - Tasks: ${urgentTasks.length > 0 ? `Urgent: ${urgentTaskTitles}` : data.tasks.length + ' tasks pending'}
 - Time: ${timeContext}
 
@@ -530,10 +541,16 @@ Response:`;
                 return null; // Will trigger fallback logic
             }
             
+            // Enhanced meeting context for prioritization
+            const meetingPriorityContext = data.meetings?.hasMeetings 
+                ? `${data.meetings.summary} (${data.meetings.nextMeeting?.urgency || 'medium'} urgency${data.meetings.nextMeeting?.hasPreparation ? ', needs prep' : ''})`
+                : 'No upcoming meetings';
+
             const prompt = `You are an AI assistant that decides what's most important to display on a GNOME desktop panel button.
 
 Current Context (${timeContext}):
 • Calendar: ${calendarContext}
+• Meetings: ${meetingPriorityContext}
 • Tasks: ${tasksContext}
 • Weather: ${data.weather.temp}°F, ${data.weather.condition}
 • System: ${data.system.nixosStatus}, ${data.system.battery}% battery
@@ -755,6 +772,9 @@ class AtAGlanceIndicator extends PanelMenu.Button {
                 tasks: await DataCollector.getTasks(),
                 system: await DataCollector.getSystemInfo()
             };
+            
+            // Add meeting context to calendar events
+            data.meetings = meetingAssistant.getMeetingContextForAI(data.calendar);
             console.log('At A Glance: Data collection complete:', { 
                 weather: data.weather.temp,
                 calendar: data.calendar.length,
