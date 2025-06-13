@@ -538,8 +538,21 @@ export class CalendarDataCollector {
         nextWeek.setDate(nextWeek.getDate() + 7);
         
         return events
-            .filter(event => !this.eventFilter.shouldExclude(event))
-            .filter(event => new Date(event.start) >= today) // Include today's events
+            .filter(event => {
+                const shouldExclude = this.eventFilter.shouldExclude(event);
+                if (!shouldExclude) {
+                    console.log(`At A Glance: KEEPING event after exclusion filter: "${event.title}" on ${event.start}`);
+                }
+                return !shouldExclude;
+            })
+            .filter(event => {
+                const eventDate = new Date(event.start);
+                const isAfterToday = eventDate >= today;
+                if (isAfterToday) {
+                    console.log(`At A Glance: KEEPING event after date filter: "${event.title}" on ${event.start}`);
+                }
+                return isAfterToday;
+            })
             .sort((a, b) => {
                 const dateA = new Date(a.start);
                 const dateB = new Date(b.start);
@@ -567,22 +580,24 @@ export class CalendarDataCollector {
         try {
             console.log(`At A Glance: Attempting to read SQLite database: ${dbPath}`);
             
-            // Check if sqlite3 is available using GLib.spawn_command_line_sync
-            const [testSuccess, testStdout] = GLib.spawn_command_line_sync('which sqlite3');
+            // Use the Nix store path for sqlite3 since it's not in the system PATH
+            const sqlitePath = '/nix/store/b83kagl3d98zf8dbvh52lw4xg881bhkf-sqlite-3.48.0-bin/bin/sqlite3';
             
-            if (!testSuccess || !testStdout) {
-                console.log(`At A Glance: sqlite3 not available, skipping database ${dbPath}`);
+            // Check if sqlite3 exists at the Nix store path
+            const sqliteFile = Gio.File.new_for_path(sqlitePath);
+            if (!sqliteFile.query_exists(null)) {
+                console.log(`At A Glance: sqlite3 not available at ${sqlitePath}, skipping database ${dbPath}`);
                 return events;
             }
             
-            console.log(`At A Glance: sqlite3 found at: ${new TextDecoder().decode(testStdout).trim()}`);
+            console.log(`At A Glance: Using sqlite3 from Nix store: ${sqlitePath}`);
             
             // Use sqlite3 command with separator to properly handle multi-line results
             // Get current date to filter for upcoming events
             const today = new Date();
             const todayStr = today.toISOString().substring(0, 10).replace(/-/g, ''); // YYYYMMDD format
             
-            const sqliteCommand = `sqlite3 "${dbPath}" "SELECT '=====EVENT_SEPARATOR=====' || ECacheOBJ || '=====EVENT_SEPARATOR=====' FROM ECacheObjects WHERE ECacheOBJ LIKE '%VEVENT%' AND (ECacheOBJ LIKE '%DTSTART%${todayStr}%' OR ECacheOBJ LIKE '%DTSTART:${todayStr}%' OR ECacheOBJ NOT LIKE '%DTSTART%2024%') ORDER BY ECacheOBJ LIMIT 25;"`;
+            const sqliteCommand = `${sqlitePath} "${dbPath}" "SELECT '=====EVENT_SEPARATOR=====' || ECacheOBJ || '=====EVENT_SEPARATOR=====' FROM ECacheObjects WHERE ECacheOBJ LIKE '%VEVENT%' AND (ECacheOBJ LIKE '%DTSTART%${todayStr}%' OR ECacheOBJ LIKE '%DTSTART:${todayStr}%' OR ECacheOBJ NOT LIKE '%DTSTART%2024%') ORDER BY ECacheOBJ LIMIT 25;"`;
             console.log(`At A Glance: Running SQLite command for events from ${todayStr} onwards with separators`);
             
             const [success, stdout, stderr] = GLib.spawn_command_line_sync(sqliteCommand);
