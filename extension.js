@@ -12,8 +12,9 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // Import calendar integration
 import { CalendarDataCollector } from './calendar-integration.js';
-// Import meeting assistant
+// Import meeting assistant and adaptive learning
 import { MeetingAssistant } from './meeting-assistant.js';
+import { AdaptiveLearning } from './adaptive-learning.js';
 // Import email integration (disabled for now)
 // import { EmailIntegration } from './email-integration.js';
 
@@ -47,7 +48,7 @@ class ClaudeRateLimit {
     constructor() {
         this.cache = new Map();
         this.usageFile = GLib.get_home_dir() + '/.config/at-a-glance/claude-usage.json';
-        this.maxDailyRequests = 100;
+        this.maxDailyRequests = 150;
         this.cacheTimeoutMinutes = 60;
         this.ensureUsageFile();
     }
@@ -193,8 +194,9 @@ class ClaudeRateLimit {
 // Global rate limiter instance
 const claudeRateLimit = new ClaudeRateLimit();
 
-// Global meeting assistant instance
+// Global meeting assistant and adaptive learning instances
 const meetingAssistant = new MeetingAssistant();
+const adaptiveLearning = new AdaptiveLearning();
 
 // Data collection object
 const DataCollector = {
@@ -403,7 +405,13 @@ const DataCollector = {
                 ? `${data.meetings.summary}${data.meetings.nextMeeting?.hasPreparation ? ' (prep needed)' : ''}`
                 : 'No meetings scheduled';
 
-            const prompt = `You are an AI assistant providing contextual insights for a desktop widget. Based on this ${timeContext} situation, provide ONE actionable insight or observation (max 60 characters):
+            // Adaptive learning context for better personalization
+            const learningContext = data.learningContext;
+            const personalizedWeights = learningContext?.personalizedWeights || {};
+            const userPreferences = learningContext?.preferredContentTypes || [];
+            const sessionInfo = `${Math.round(learningContext?.sessionLength || 0)}min session, ${learningContext?.interactionCount || 0} interactions`;
+
+            const prompt = `You are an AI assistant providing contextual insights for a desktop widget. Based on this ${timeContext} situation and user patterns, provide ONE actionable insight or observation (max 60 characters):
 
 Context:
 - Weather: ${weatherTemp}°F, ${weatherCondition}
@@ -411,6 +419,8 @@ Context:
 - Meetings: ${meetingContext}
 - Tasks: ${urgentTasks.length > 0 ? `Urgent: ${urgentTaskTitles}` : data.tasks.length + ' tasks pending'}
 - Time: ${timeContext}
+- User Session: ${sessionInfo}
+- User Preferences: ${userPreferences.length > 0 ? userPreferences.join(', ') : 'Learning patterns'}
 
 Be creative and contextual. Consider patterns like:
 - Productivity suggestions based on schedule/weather
@@ -546,6 +556,15 @@ Response:`;
                 ? `${data.meetings.summary} (${data.meetings.nextMeeting?.urgency || 'medium'} urgency${data.meetings.nextMeeting?.hasPreparation ? ', needs prep' : ''})`
                 : 'No upcoming meetings';
 
+            // Get personalized priorities from adaptive learning
+            const personalizedWeights = data.learningContext?.personalizedWeights || {};
+            const topUserPreference = data.learningContext?.preferredContentTypes?.[0] || 'unknown';
+            const weightSummary = Object.entries(personalizedWeights)
+                .sort(([,a], [,b]) => b - a)
+                .slice(0, 3)
+                .map(([type, weight]) => `${type}:${Math.round(weight * 100)}%`)
+                .join(', ');
+
             const prompt = `You are an AI assistant that decides what's most important to display on a GNOME desktop panel button.
 
 Current Context (${timeContext}):
@@ -554,10 +573,13 @@ Current Context (${timeContext}):
 • Tasks: ${tasksContext}
 • Weather: ${data.weather.temp}°F, ${data.weather.condition}
 • System: ${data.system.nixosStatus}, ${data.system.battery}% battery
+• User Priorities: ${weightSummary || 'Default weights'}
+• User Preference: ${topUserPreference}
 
 Choose the SINGLE most important thing to display right now based on:
 - Time sensitivity and urgency
-- User context and priorities
+- User's personalized priorities and patterns
+- Relevance to current situation
 - Relevance to current situation
 
 Format: emoji + brief text (max 35 characters)
@@ -677,6 +699,10 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         // Create AI summary as primary content
         this._aiSummaryItem = new PopupMenu.PopupMenuItem('🤖 Loading insights...');
         this._aiSummaryItem.connect('activate', () => {
+            adaptiveLearning.recordInteraction('click', { 
+                contentType: 'ai_summary',
+                context: 'detailed_view_toggle'
+            });
             this._toggleDetailedView();
         });
         this.menu.addMenuItem(this._aiSummaryItem);
@@ -697,11 +723,23 @@ class AtAGlanceIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._tasksItem);
         this.menu.addMenuItem(this._systemItem);
         
-        // Add click handlers
-        this._weatherItem.connect('activate', () => this._handleWeatherClick());
-        this._calendarItem.connect('activate', () => this._handleCalendarClick());
-        this._tasksItem.connect('activate', () => this._handleTasksClick());
-        this._systemItem.connect('activate', () => this._handleSystemClick());
+        // Add click handlers with learning tracking
+        this._weatherItem.connect('activate', () => {
+            adaptiveLearning.recordInteraction('click', { contentType: 'weather' });
+            this._handleWeatherClick();
+        });
+        this._calendarItem.connect('activate', () => {
+            adaptiveLearning.recordInteraction('click', { contentType: 'calendar' });
+            this._handleCalendarClick();
+        });
+        this._tasksItem.connect('activate', () => {
+            adaptiveLearning.recordInteraction('click', { contentType: 'tasks' });
+            this._handleTasksClick();
+        });
+        this._systemItem.connect('activate', () => {
+            adaptiveLearning.recordInteraction('click', { contentType: 'system' });
+            this._handleSystemClick();
+        });
 
         // Settings menu
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
@@ -774,7 +812,13 @@ class AtAGlanceIndicator extends PanelMenu.Button {
             };
             
             // Add meeting context to calendar events
+            console.log('At A Glance: Processing', data.calendar.length, 'calendar events with meeting assistant');
             data.meetings = meetingAssistant.getMeetingContextForAI(data.calendar);
+            console.log('At A Glance: Meeting context generated:', data.meetings);
+            
+            // Add adaptive learning context
+            data.learningContext = adaptiveLearning.getContextualInsights();
+            console.log('At A Glance: Learning context generated:', data.learningContext);
             console.log('At A Glance: Data collection complete:', { 
                 weather: data.weather.temp,
                 calendar: data.calendar.length,
